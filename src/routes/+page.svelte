@@ -31,10 +31,10 @@
 		}
 		fetch(`${url}/`, {
 			method: 'POST',
-            header : {
-                'Content-Type': 'multipart/form-data' // Let browser set this boundary
-                'authorization': `Bearer ${localStorage.getItem('access')}`
-            },
+			header: {
+				'Content-Type': 'multipart/form-data', // Let browser set this boundary
+				authorization: `Bearer ${localStorage.getItem('access')}`
+			},
 			body: new FormData().append('image', selectedFile)
 		});
 		resultText = '⏳ Analyzing... Please wait.';
