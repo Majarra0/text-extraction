@@ -44,7 +44,7 @@
 			localStorage.setItem('user', JSON.stringify(data.user));
 
 			// Redirect after signup
-			// window.location.href = '/dashboard';
+			window.location.href = '/dashboard';
 		} catch (err) {
 			error = 'Network error';
 			console.error(err);
