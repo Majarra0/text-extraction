@@ -243,12 +243,6 @@
 			</div>
 		{/if}
 	</section>
-
-	<footer class="bg-white border-t border-gray-100">
-		<div class="max-w-7xl mx-auto px-4 py-4 text-center text-gray-400 text-xs">
-			&copy; 2025 VisionAI. All rights reserved. Built with Svelte and Tailwind CSS.
-		</div>
-	</footer>
 </main>
 
 <style>
