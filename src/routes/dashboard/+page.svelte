@@ -1,162 +1,112 @@
-<script lang="js">
-	import { Activity, CreditCard, DollarSign, Users, Search, Bell, Menu } from 'lucide-svelte';
-
-	// Ensure shadcn-svelte is initialized in your project. If you see config errors, run:
-	// npx shadcn-svelte@latest init
-
-	// Import UI components only if they exist. If you get import errors, generate them with shadcn-svelte:
-	// npx shadcn-svelte@latest add button card table avatar input
-	import { Button } from '$lib/components/ui/button';
-	import * as Card from '$lib/components/ui/card';
-	import * as Table from '$lib/components/ui/table';
-	import * as Avatar from '$lib/components/ui/avatar';
+<script lang="ts">
+	import { Search, Trash2, Image as ImageIcon } from 'lucide-svelte';
 	import { Input } from '$lib/components/ui/input';
-
-	// Mock Data for Recent Sales
-	const recentSales = [
+	import { Button } from '$lib/components/ui/button';
+	import * as Table from '$lib/components/ui/table';
+	import { on } from 'svelte/events';
+	// 1. Mock Data representing photos with extracted text
+	// In a real app, this would come from your API via `export let data;`
+	let extractedDataItems = [
 		{
-			name: 'Olivia Martin',
-			email: 'olivia.martin@email.com',
-			amount: '+$1,999.00',
-			initials: 'OM'
+			id: '1',
+			imageUrl: 'https://picsum.photos/id/237/200/200',
+			extractedText: 'Receipt ID: 123456. Total: $45.99. Date: 2023-10-27.'
 		},
-		{ name: 'Jackson Lee', email: 'jackson.lee@email.com', amount: '+$39.00', initials: 'JL' },
 		{
-			name: 'Isabella Nguyen',
-			email: 'isabella.nguyen@email.com',
-			amount: '+$299.00',
-			initials: 'IN'
+			id: '2',
+			imageUrl: 'https://picsum.photos/id/1/200/200',
+			extractedText:
+				'Warning: Unauthorized access prohibited. Security cameras in use. Please keep clear of the area.'
 		},
-		{ name: 'William Kim', email: 'will@email.com', amount: '+$99.00', initials: 'WK' },
-		{ name: 'Sofia Davis', email: 'sofia.davis@email.com', amount: '+$39.00', initials: 'SD' }
+		{
+			id: '3',
+			imageUrl: 'https://picsum.photos/id/10/200/200',
+			extractedText:
+				'Notes from meeting: Discussed Q4 goals, marketing strategy, and budget allocation.'
+		},
+		{
+			id: '4',
+			imageUrl: 'https://picsum.photos/id/20/200/200',
+			extractedText: 'Invoice #99281. Billed to Acme Corp. Due date: Immediate.'
+		},
+		{
+			id: '5',
+			imageUrl: 'https://picsum.photos/id/30/200/200',
+			extractedText: 'Menu item number 4: Grilled Salmon with asparagus.'
+		}
 	];
+
+	function handleRemove(id: string) {
+		console.log(`Removing item with id: ${id}`);
+		extractedDataItems = extractedDataItems.filter((item) => item.id !== id);
+		console.log('Item removed. Current items:', extractedDataItems.length);
+	}
 </script>
 
-<div class="flex min-h-screen flex-col">
+<div class="flex min-h-screen flex-col bg-background">
 	<header
-		class="border-b px-6 py-3 flex items-center justify-between sticky top-0 bg-background z-10"
+		class="sticky top-0 z-10 flex h-16 items-center justify-between border-b bg-background/95 px-6 backdrop-blur supports-[backdrop-filter]:bg-background/60"
 	>
-		<div class="flex items-center gap-4">
-			<h1 class="text-xl font-bold tracking-tight">Dashboard</h1>
-			<nav class="hidden md:flex items-center gap-6 text-sm font-medium text-muted-foreground ml-6">
-				<a href="##" class="text-foreground transition-colors hover:text-foreground">Overview</a>
-				<a href="##" class="transition-colors hover:text-foreground">Customers</a>
-				<a href="##" class="transition-colors hover:text-foreground">Products</a>
-				<a href="##" class="transition-colors hover:text-foreground">Settings</a>
-			</nav>
-		</div>
-
-		<div class="flex items-center gap-4">
-			<div class="relative hidden sm:block">
-				<Search class="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-				<Input type="search" placeholder="Search..." class="w-[200px] pl-8 lg:w-[300px]" />
-			</div>
-			<Button variant="outline" size="icon" class="rounded-full" disabled={false}>
-				<Bell class="h-4 w-4" />
-			</Button>
-			<Avatar.Root class="h-8 w-8 cursor-pointer">
-				<Avatar.Image src="https://github.com/shadcn.png" alt="@shadcn" class="" />
-				<Avatar.Fallback class="">CN</Avatar.Fallback>
-			</Avatar.Root>
+		<div class="flex items-center gap-2 font-bold">
+			<ImageIcon class="h-5 w-5" />
+			<h1 class="text-lg tracking-tight">Dashboard</h1>
 		</div>
 	</header>
 
-	<main class="flex-1 space-y-4 p-8 pt-6">
-		<div class="flex items-center justify-between space-y-2">
-			<h2 class="text-3xl font-bold tracking-tight">Overview</h2>
-			<div class="flex items-center space-x-2">
-				<Button class="" disabled={false}>Download Report</Button>
+	<main class="flex-1 p-6">
+		<!-- // search bar with functionality can be added later -->
+		<div class="mb-4 flex items-center justify-between">
+			<div class="relative w-full max-w-xs">
+				<Search class="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+				<Input type="search" placeholder="Search extracted text..." class="w-full pl-8" />
 			</div>
 		</div>
+		<div class="rounded-md border">
+			<Table.Root>
+				<Table.Header>
+					<Table.Row>
+						<Table.Head class="w-[100px]">Photo</Table.Head>
+						<Table.Head>Extracted Text</Table.Head>
+						<Table.Head class="text-right">Remove</Table.Head>
+					</Table.Row>
+				</Table.Header>
+				<Table.Body>
+					{#each extractedDataItems as item (item.id)}
+						<Table.Row>
+							<Table.Cell>
+								<img
+									src={item.imageUrl}
+									alt="Source"
+									class="aspect-square h-16 w-16 rounded-md object-cover border"
+								/>
+							</Table.Cell>
 
-		<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-			<Card.Root class="">
-				<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
-					<Card.Title class="text-sm font-medium">Total Revenue</Card.Title>
-					<DollarSign class="h-4 w-4 text-muted-foreground" />
-				</Card.Header>
-				<Card.Content class="">
-					<div class="text-2xl font-bold">$45,231.89</div>
-					<p class="text-xs text-muted-foreground">+20.1% from last month</p>
-				</Card.Content>
-			</Card.Root>
+							<Table.Cell class="font-medium">
+								<p class="line-clamp-3 text-sm">
+									{item.extractedText}
+								</p>
+							</Table.Cell>
 
-			<Card.Root class="">
-				<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
-					<Card.Title class="text-sm font-medium">Subscriptions</Card.Title>
-					<Users class="h-4 w-4 text-muted-foreground" />
-				</Card.Header>
-				<Card.Content class="">
-					<div class="text-2xl font-bold">+2350</div>
-					<p class="text-xs text-muted-foreground">+180.1% from last month</p>
-				</Card.Content>
-			</Card.Root>
-
-			<Card.Root class="">
-				<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
-					<Card.Title class="text-sm font-medium">Sales</Card.Title>
-					<CreditCard class="h-4 w-4 text-muted-foreground" />
-				</Card.Header>
-				<Card.Content class="">
-					<div class="text-2xl font-bold">+12,234</div>
-					<p class="text-xs text-muted-foreground">+19% from last month</p>
-				</Card.Content>
-			</Card.Root>
-
-			<Card.Root class="">
-				<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
-					<Card.Title class="text-sm font-medium">Active Now</Card.Title>
-					<Activity class="h-4 w-4 text-muted-foreground" />
-				</Card.Header>
-				<Card.Content class="">
-					<div class="text-2xl font-bold">+573</div>
-					<p class="text-xs text-muted-foreground">+201 since last hour</p>
-				</Card.Content>
-			</Card.Root>
-		</div>
-
-		<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-			<Card.Root class="col-span-4">
-				<Card.Header class="">
-					<Card.Title class="">Overview</Card.Title>
-				</Card.Header>
-				<Card.Content class="pl-2">
-					<div
-						class="h-[300px] w-full flex items-end justify-between gap-2 p-4 border rounded bg-muted/20"
-					>
-						{#each Array(12) as _, i}
-							<div
-								class="w-full bg-primary/90 rounded-t-sm hover:bg-primary transition-all"
-								style="height: {Math.floor(Math.random() * 80) + 20}%"
-							></div>
-						{/each}
-					</div>
-					<p class="text-center text-xs text-muted-foreground mt-2">Jan - Dec 2024</p>
-				</Card.Content>
-			</Card.Root>
-
-			<Card.Root class="col-span-3">
-				<Card.Header class="">
-					<Card.Title class="">Recent Sales</Card.Title>
-					<Card.Description class="">You made 265 sales this month.</Card.Description>
-				</Card.Header>
-				<Card.Content class="">
-					<div class="space-y-8">
-						{#each recentSales as sale}
-							<div class="flex items-center">
-								<Avatar.Root class="h-9 w-9">
-									<Avatar.Fallback class="">{sale.initials}</Avatar.Fallback>
-								</Avatar.Root>
-								<div class="ml-4 space-y-1">
-									<p class="text-sm font-medium leading-none">{sale.name}</p>
-									<p class="text-sm text-muted-foreground">{sale.email}</p>
-								</div>
-								<div class="ml-auto font-medium">{sale.amount}</div>
-							</div>
-						{/each}
-					</div>
-				</Card.Content>
-			</Card.Root>
+							<Table.Cell class="text-right">
+								<Button
+									variant="ghost"
+									size="icon"
+									class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+									onclick={() => handleRemove(item.id)}
+									aria-label="Remove item"
+								>
+									<Trash2 class="h-5 w-5" />
+								</Button>
+							</Table.Cell>
+						</Table.Row>
+					{/each}
+					{#if extractedDataItems.length === 0}
+						<Table.Row>
+							<Table.Cell colspan={3} class="h-24 text-center">No results found.</Table.Cell>
+						</Table.Row>
+					{/if}
+				</Table.Body>
+			</Table.Root>
 		</div>
 	</main>
 </div>
