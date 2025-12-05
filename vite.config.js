@@ -1,8 +1,11 @@
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
-
-import tailwindcss from '@tailwindcss/vite';
-
-export default defineConfig({
-	plugins: [tailwindcss(), sveltekit()]
-});
+import tailwindcss from '@tailwindcss/postcss';
+export default {
+	plugins: [sveltekit(), tailwindcss()],
+	optimizeDeps: {
+		include: ['bits-ui']
+	},
+	ssr: {
+		noExternal: ['bits-ui']
+	}
+};
