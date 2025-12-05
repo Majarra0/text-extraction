@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { Search, Trash2, Image as ImageIcon } from 'lucide-svelte';
+	import { onMount } from 'svelte';
 	import { Input } from '$lib/components/ui/input';
 	import { Button } from '$lib/components/ui/button';
 	import * as Table from '$lib/components/ui/table';
 	import { on } from 'svelte/events';
+
 	// 1. Mock Data representing photos with extracted text
 	// In a real app, this would come from your API via `export let data;`
 	let extractedDataItems = [
@@ -41,6 +43,15 @@
 		extractedDataItems = extractedDataItems.filter((item) => item.id !== id);
 		console.log('Item removed. Current items:', extractedDataItems.length);
 	}
+	// Check authentication only on client-side
+	onMount(() => {
+		if (localStorage.getItem('access') === null) {
+			window.location.href = '/login';
+		}
+		if (localStorage.getItem('refresh') === null) {
+			window.location.href = '/login';
+		}
+	});
 </script>
 
 <div class="flex min-h-screen flex-col bg-background">
