@@ -10,6 +10,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Button } from '$lib/components/ui/button';
 	import { Label } from '$lib/components/ui/label';
+	import { API_ROUTES } from '$lib/config';
 
 	// Form State
 	let name = '';
@@ -23,9 +24,8 @@
 		e.preventDefault();
 		loading = true;
 		error = '';
-		const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
 		try {
-			const res = await fetch(`${apiUrl}/api/v1/users/signup/`, {
+			const res = await fetch(API_ROUTES.auth.signup, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ name, email, password })
