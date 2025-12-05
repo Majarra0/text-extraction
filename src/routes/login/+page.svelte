@@ -22,9 +22,9 @@
 		e.preventDefault();
 		loading = true;
 		error = '';
-
+		const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
 		try {
-			const res = await fetch('http://172.20.10.11:8000/api/v1/users/login/', {
+			const res = await fetch(`${apiUrl}/api/v1/users/login/`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ email, password })
