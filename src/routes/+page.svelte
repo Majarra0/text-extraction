@@ -11,7 +11,8 @@
 		ensureUploadsSocketReady
 	} from '$lib/api/uploadsSocket';
 	import { notifySuccess } from '$lib/stores/notifications';
-
+	
+	type FollowupQAEntry = { role: string; content: string };
 	type UploadResponse = {
 		id: string;
 		image_url?: string | null;
@@ -23,7 +24,10 @@
 		ocr_mode?: 'fast' | 'high_accuracy';
 		status?: string;
 		streamed_text?: string | null;
+		followup_qa?: FollowupQAEntry[];
 		error?: string | null;
+		question?: string | null;
+		answer?: string | null;
 	};
 	type UploadCard = UploadResponse & { previewObjectUrl?: string | null };
 
@@ -41,8 +45,9 @@
 		raw_text?: string | null;
 		processed_text?: string | null;
 		image_url?: string | null;
+		question?: string | null;
 		answer?: string | null;
-		response?: string | null;
+		followup_qa?: FollowupQAEntry[];
 		data?: Record<string, unknown> | null;
 	};
 
@@ -85,7 +90,7 @@
 	let pendingQuestionReject: ((error: Error) => void) | null = null;
 	let pendingQuestionTimeout: ReturnType<typeof setTimeout> | null = null;
 	const WEBSOCKET_TIMEOUT_MS = 60000;
-	const QUESTION_TIMEOUT_MS = 20000;
+	const QUESTION_TIMEOUT_MS = import.meta.env.VITE_API_TIMEOUT||3000000;
 
 	$: uploadedImageEndpoint = uploadResult?.image_url
 		? toAbsoluteUrl(uploadResult.image_url)
@@ -192,8 +197,8 @@
 				requestData: metadata,
 				onProgress: (status, extras) => handleUploadProgress(status, extras)
 			});
-
-			const uploadWithPreview = await withPreview(upload, token);
+			hydrateChatFromFollowups(upload.followup_qa);
+			const uploadWithPreview = await withPreview(upload);
 			const updatedHistory = [
 				uploadWithPreview,
 				...recentUploads.filter((item) => item.id !== uploadWithPreview.id)
@@ -376,19 +381,19 @@
 			socket.onmessage = (event) => {
 				let payload: UploadSocketMessage;
 				try {
+					console.log(event.data);
+					console.log(JSON.parse(event.data));
 					payload = JSON.parse(event.data) as UploadSocketMessage;
 				} catch (error) {
 					console.error('Failed to parse websocket payload', error);
 					return;
 				}
-
+				// console.log(payload);
 				if (!payload?.type) {
 					return;
 				}
 
-				if (handleQuestionResponseFromSocket(payload)) {
-					return;
-				}
+				handleQuestionResponseFromSocket(payload);
 
 				if (payload.type === 'Upload.created') {
 					if (payload.error) {
@@ -398,11 +403,19 @@
 					}
 					const upload = extractUploadFromPayload(payload);
 					if (!upload) return;
+
 					handleProgress(upload, { duplicate: payload.duplicate ?? false });
+  					hydrateChatFromFollowups(upload.followup_qa);
 					if (payload.duplicate) {
 						finishWithSuccess(upload);
 					}
 					return;
+				}
+
+				if (payload.type === 'Upload.updated') {
+					const upload = extractUploadFromPayload(payload);
+					if (!upload) return;
+					hydrateChatFromFollowups(upload.followup_qa);
 				}
 
 				if (payload.type === 'Upload.status') {
@@ -410,6 +423,20 @@
 					if (!upload) return;
 					handleProgress(upload);
 					const status = upload.status?.toLowerCase();
+					if (status === 'answered') {
+						appendAnsweredQuestionToChat({
+							question:
+								typeof upload.question === 'string'
+									? upload.question
+									: typeof payload.instance?.question === 'string'
+										? payload.instance.question
+										: typeof payload.question === 'string'
+											? payload.question
+											: undefined,
+							answer: extractAnswerFromQuestionPayload(payload) ?? upload.answer
+						});
+						return;
+					}
 					if (status === 'processed') {
 						finishWithSuccess(upload);
 					} else if (status === 'error') {
@@ -428,19 +455,28 @@
 	}
 
 	function extractUploadFromPayload(payload: UploadSocketMessage): UploadResponse | null {
+		// check the followup_qa
+		  const followups = Array.isArray(payload.instance?.followup_qa)
+			? payload.instance!.followup_qa
+			: Array.isArray(payload.followup_qa)
+			? payload.followup_qa
+			: [];
 		if (payload.instance) {
-			return payload.instance;
+			return { ...payload.instance, followup_qa: followups };
 		}
 		if (!payload.id) {
 			return null;
 		}
 		return {
-			id: payload.id,
-			status: payload.status,
-			streamed_text: payload.streamed_text,
-			raw_text: payload.raw_text,
-			processed_text: payload.processed_text,
-			image_url: payload.image_url
+		id: payload.id,
+		status: payload.status,
+		streamed_text: payload.streamed_text,
+		raw_text: payload.raw_text,
+		processed_text: payload.processed_text,
+		image_url: payload.image_url,
+		followup_qa: followups,
+		question: typeof payload.question === 'string' ? payload.question : undefined,
+		answer: typeof payload.answer === 'string' ? payload.answer : undefined
 		};
 	}
 
@@ -479,7 +515,35 @@
 		}
 		return messages.length > 0 ? messages.join(' ') : 'Upload failed.';
 	}
+	function appendAnsweredQuestionToChat(entry: { question?: string | null; answer?: string | null }) {
+		const normalize = (value?: string | null) => {
+			if (!value) return undefined;
+			const trimmed = value.trim();
+			return trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
+		};
 
+		const question = normalize(entry.question);
+		const answer = normalize(entry.answer);
+
+		if (question && !chatMessages.some((m) => m.role === 'user' && m.text === question)) {
+			appendChatMessage(createChatMessage('user', question));
+		}
+		if (answer && !chatMessages.some((m) => m.role === 'assistant' && m.text === answer)) {
+			appendChatMessage(createChatMessage('assistant', answer));
+		}
+	}
+	function hydrateChatFromFollowups(followups?: FollowupQAEntry[] | null) {
+		if (!Array.isArray(followups)) return;
+		const mapped = followups
+			.filter((item) => typeof item?.content === 'string' && item.content.trim())
+			.map((item) => {
+			const role = item.role === 'user' || item.role === 'assistant' ? item.role : 'system';
+			return createChatMessage(role, item.content);
+			});
+		if (mapped.length) {
+			chatMessages = mapped;
+		}
+	}
 	function resetChatState() {
 		chatMessages = [];
 		chatInput = '';
@@ -503,7 +567,6 @@
 	function appendChatMessage(message: ChatMessage) {
 		chatMessages = [...chatMessages, message];
 	}
-
 	function handleChatKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter' && !event.shiftKey) {
 			event.preventDefault();
@@ -535,9 +598,18 @@
 			return false;
 		}
 		const type = payload.type?.toLowerCase() ?? '';
+		const instance = payload.instance ?? null;
 		const hasAnswerField =
 			typeof payload.answer === 'string' ||
-			(typeof payload.data === 'object' && payload.data !== null && typeof payload.data['answer'] === 'string');
+			typeof payload.question === 'string' ||
+			typeof payload.status === 'string' && payload.status.toLowerCase().includes('answer') ||
+			(instance &&
+				(typeof instance.answer === 'string' ||
+					typeof instance.question === 'string' ||
+					(typeof instance.status === 'string' && instance.status.toLowerCase().includes('answer')))) ||
+			(typeof payload.data === 'object' &&
+				payload.data !== null &&
+				typeof (payload.data as Record<string, unknown>)['answer'] === 'string');
 		if (!type.includes('answer') && !type.includes('question') && !hasAnswerField) {
 			return false;
 		}
@@ -796,6 +868,7 @@
 		}
 		activeUploadSocket = null;
 	}
+
 </script>
 
 <Header title="OCR"></Header>

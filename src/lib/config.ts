@@ -70,7 +70,7 @@ export function buildWebSocketUrl(
 ) {
 	const normalizedPath = normalizeWebSocketPath(path);
 	const protocol = backendUrlObject.protocol === 'https:' ? 'wss:' : 'ws:';
-	const url = new URL(`${protocol}//${backendUrlObject.host}${normalizedPath}`);
+	const url = new URL(`${protocol}//${backendUrlObject.host}${normalizedPath}?token=${params?.token}`);
 	if (params) {
 		for (const [key, value] of Object.entries(params)) {
 			if (value === undefined || value === null) continue;

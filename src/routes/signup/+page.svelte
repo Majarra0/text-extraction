@@ -60,8 +60,10 @@
 	}
 </script>
 
-<div class="flex flex-col items-center justify-center min-h-screen bg-gray-50 gap-4 px-4">
-	<p class="text-sm uppercase tracking-[0.2em] text-gray-500 text-center">Yo, get your text instantly.</p>
+<div class="flex flex-col items-center justify-center min-h-screen gap-4 px-4">
+	<p class="text-sm uppercase tracking-[0.2em] text-gray-500 text-center">
+		Yo, get your text instantly.
+	</p>
 	<Card class="w-[380px] shadow-md">
 		<CardHeader class="text-center">
 			<CardTitle class="text-xl">Create an Account</CardTitle>
