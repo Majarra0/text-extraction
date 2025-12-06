@@ -1,34 +1,42 @@
 <script>
-	import { Image as ImageIcon } from 'lucide-svelte';
+	import { Image as ImageIcon, Moon, Sun } from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
-	// Allow the title to be passed in, defaulting to "Dashboard"
-	let { title = 'Dashboard' } = $props();
+	import { BRAND_NAME } from '$lib/brand';
+	import { applyTheme, getPreferredTheme, getStoredTheme, toggleTheme as flipTheme } from '$lib/theme';
+	// Page-specific title still supported but brand always YOCR
+	let { title = BRAND_NAME } = $props();
 	let loginStatus = $state(false);
-	let isHome = $state(false);
+	let isHomeRoute = $state(true);
+	let theme = $state('light');
+
+	function toggleTheme() {
+		theme = flipTheme(theme);
+	}
+
 	onMount(() => {
-		isHome = window.location.pathname !== '/';
-		console.log('Header mounted');
+		isHomeRoute = window.location.pathname === '/';
 		loginStatus = !!localStorage.getItem('access');
-		console.log(loginStatus);
+		const stored = getStoredTheme();
+		const initial = stored ?? getPreferredTheme();
+		theme = initial;
+		applyTheme(initial);
 	});
 </script>
 
 <header
 	class="sticky top-0 z-10 flex h-16 items-center justify-between border-b bg-background/95 px-6 backdrop-blur supports-[backdrop-filter]:bg-background/60"
 >
-	<div class="flex items-center gap-2 font-bold">
-		<ImageIcon class="h-5 w-5" />
-		<h1 class="text-lg tracking-tight">{title}</h1>
-		{#if isHome}
-			<div
-				class="px-4 bg-transparent text-[var(--primary)] cursor-pointer"
-				onclick={() => {
-					window.location.href = '/';
-				}}
-			>
-				home
-			</div>
+	<div class="flex items-center gap-3 font-bold">
+		<a
+			href="/"
+			class="flex items-center gap-3 rounded-lg bg-transparent text-left transition hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+		>
+			<ImageIcon class="h-6 w-6 text-[var(--primary)]" />
+			<p class="text-lg font-bold tracking-tight">{BRAND_NAME}</p>
+		</a>
+		{#if title && title !== BRAND_NAME}
+			<span class="hidden sm:inline text-xs uppercase tracking-wide text-[var(--muted-foreground)]">/ {title}</span>
 		{/if}
 	</div>
 
@@ -36,7 +44,20 @@
 	<div class="flex items-center gap-4">
 		<slot />
 		<div class="flex items-center gap-4">
-			{#if !isHome && loginStatus}
+			<Button
+				variant="ghost"
+				size="icon"
+				class="cursor-pointer"
+				onclick={toggleTheme}
+				aria-label="Toggle color mode"
+			>
+				{#if theme === 'dark'}
+					<Sun class="h-4 w-4" />
+				{:else}
+					<Moon class="h-4 w-4" />
+				{/if}
+			</Button>
+			{#if isHomeRoute && loginStatus}
 				<div
 					class="px-4 bg-transparent text-[var(--primary)] cursor-pointer"
 					onclick={() => {

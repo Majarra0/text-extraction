@@ -5,11 +5,15 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Table from '$lib/components/ui/table';
 	import Header from '../components/header.svelte';
-	import { API_ROUTES, toAbsoluteUrl } from '$lib/config';
+	import { API_ROUTES, toAbsoluteUrl, buildWebSocketUrl } from '$lib/config';
 
 	/**
 	 * @typedef {{
 	 * 	id: string;
+	 * 	auto_language_detection?: boolean;
+	 * 	language_hint?: string | null;
+	 * 	output_format?: 'raw' | 'paragraph';
+	 * 	ocr_mode?: 'fast' | 'high_accuracy';
 	 * 	image_url?: string | null;
 	 * 	raw_text?: string | null;
 	 * 	processed_text?: string | null;
@@ -17,12 +21,40 @@
 	 *
 	 * @typedef {{
 	 * 	id: string;
+	 * 	autoLanguageDetection: boolean;
+	 * 	languageHint: string | null;
+	 * 	outputFormat: 'raw' | 'paragraph';
+	 * 	ocrMode: 'fast' | 'high_accuracy';
 	 * 	imageUrl: string;
 	 * 	extractedText: string;
 	 * }} UploadRow
 	 */
 
-	// Svelte 5 State
+	/**
+	 * @param {UploadResponse} upload
+	 * @returns {UploadRow}
+	 */
+	function mapUploadToRow(upload) {
+		return {
+			id: upload.id,
+			autoLanguageDetection: upload.auto_language_detection ?? true,
+			languageHint: upload.language_hint ?? null,
+			outputFormat: normalizeOutputFormat(upload.output_format),
+			ocrMode: normalizeOcrMode(upload.ocr_mode),
+			imageUrl: toAbsoluteUrl(upload.image_url),
+			extractedText:
+				upload.processed_text || upload.raw_text || 'No extracted text is available yet.'
+		};
+	}
+
+	function normalizeOutputFormat(value) {
+		return value === 'paragraph' ? 'paragraph' : 'raw';
+	}
+
+	function normalizeOcrMode(value) {
+		return value === 'high_accuracy' ? 'high_accuracy' : 'fast';
+	}
+
 	/** @type {UploadRow[]} */
 	let extractedDataItems = $state([]);
 	/** @type {Set<string>} */
@@ -32,12 +64,19 @@
 	let fetchError = $state('');
 	/** @type {Map<string, string>} */
 	let imagePreviewUrls = $state(new Map());
+	let lastSuccessfulAccessToken = null;
+	const websocketConnections = new Map();
+	const websocketRetryTimers = new Map();
+	let dashboardDestroyed = false;
+	const WEBSOCKET_RECONNECT_DELAY = 4000;
 
 	onMount(() => {
 		void initializeDashboard();
 	});
 	onDestroy(() => {
+		dashboardDestroyed = true;
 		clearImagePreviews();
+		cleanupWebsockets();
 	});
 
 	async function initializeDashboard() {
@@ -83,12 +122,6 @@
 		return null;
 	}
 
-	/**
-	 * @param {string} token
-	 */
-	/**
-	 * @param {string} token
-	 */
 	async function loadUploads(token) {
 		isLoading = true;
 		fetchError = '';
@@ -114,14 +147,11 @@
 
 			const uploads = /** @type {UploadResponse[]} */ (await response.json());
 
-			extractedDataItems = uploads.map((upload) => ({
-				id: upload.id,
-				imageUrl: toAbsoluteUrl(upload.image_url),
-				extractedText:
-					upload.processed_text || upload.raw_text || 'No extracted text is available yet.'
-			}));
+			extractedDataItems = uploads.map(mapUploadToRow);
+			lastSuccessfulAccessToken = authToken;
 			await preloadImagePreviews(extractedDataItems, authToken);
 			selectedIds = new Set();
+			syncWebsocketSubscriptions(extractedDataItems);
 		} catch (error) {
 			console.error('Failed to fetch uploads:', error);
 			const message = error instanceof Error ? error.message : 'Unable to load uploads.';
@@ -131,9 +161,6 @@
 		}
 	}
 
-	/**
-	 * @param {string} token
-	 */
 	function fetchUploads(token) {
 		return fetch(API_ROUTES.core.uploads, {
 			headers: {
@@ -142,10 +169,92 @@
 		});
 	}
 
-	/**
-	 * @param {UploadRow[]} items
-	 * @param {string} token
-	 */
+	function syncWebsocketSubscriptions(items) {
+		const ids = new Set(items.map((item) => item.id));
+		for (const id of websocketConnections.keys()) {
+			if (!ids.has(id)) {
+				unsubscribeFromUpload(id);
+			}
+		}
+		for (const id of ids) {
+			subscribeToUpload(id);
+		}
+	}
+
+	function subscribeToUpload(id) {
+		if (dashboardDestroyed || websocketConnections.has(id)) return;
+		const wsUrl = buildWebSocketUrl(`/ws/core/Upload/${id}/`);
+		try {
+			const socket = new WebSocket(wsUrl);
+			websocketConnections.set(id, socket);
+			socket.onopen = () => {
+				try {
+					socket.send(JSON.stringify({ type: 'subscribe' }));
+				} catch (error) {
+					console.warn('Failed to send subscribe message', error);
+				}
+			};
+			socket.onmessage = (event) => handleSocketMessage(id, event);
+			socket.onerror = () => {
+				socket.close();
+			};
+			socket.onclose = () => handleSocketClose(id);
+		} catch (error) {
+			console.error(`Failed to connect to websocket for upload ${id}`, error);
+		}
+	}
+
+	function handleSocketClose(id) {
+		websocketConnections.delete(id);
+		if (dashboardDestroyed) return;
+		if (websocketRetryTimers.has(id)) return;
+		const timer = setTimeout(() => {
+			websocketRetryTimers.delete(id);
+			subscribeToUpload(id);
+		}, WEBSOCKET_RECONNECT_DELAY);
+		websocketRetryTimers.set(id, timer);
+	}
+
+	function unsubscribeFromUpload(id) {
+		const socket = websocketConnections.get(id);
+		if (socket) {
+			socket.onclose = null;
+			socket.close();
+			websocketConnections.delete(id);
+		}
+		const timer = websocketRetryTimers.get(id);
+		if (timer) {
+			clearTimeout(timer);
+			websocketRetryTimers.delete(id);
+		}
+	}
+
+	function cleanupWebsockets() {
+		for (const id of websocketConnections.keys()) {
+			unsubscribeFromUpload(id);
+		}
+	}
+
+	function handleSocketMessage(id, event) {
+		let payload;
+		try {
+			payload = JSON.parse(event.data);
+		} catch (error) {
+			console.error('Failed to parse websocket payload', error);
+			return;
+		}
+		if (!payload || payload.type !== 'Upload.status') {
+			return;
+		}
+		if (!payload.instance) {
+			removeUploadRow(id);
+			unsubscribeFromUpload(id);
+			return;
+		}
+		const mapped = mapUploadToRow(payload.instance);
+		upsertUploadRow(mapped);
+	}
+
 	async function preloadImagePreviews(items, token) {
 		clearImagePreviews();
 		const entries = await Promise.all(
@@ -191,25 +300,18 @@
 		window.location.href = '/login';
 	}
 
-	/**
-	 * @param {string | null | undefined} url
-	 */
 	function hasDisplayableImage(url) {
 		return typeof url === 'string' && /^(https?:|data:|blob:)/.test(url);
 	}
 
-	// Filter items based on search query
 	let filteredItems = $derived(
 		extractedDataItems.filter((item) =>
 			item.extractedText.toLowerCase().includes(searchQuery.toLowerCase())
 		)
 	);
-	/**
-	 * @param {string} id
-	 */
+
 	function handleRemove(id) {
 		extractedDataItems = extractedDataItems.filter((item) => item.id !== id);
-		// Also remove from selection if it was selected
 		if (selectedIds.has(id)) {
 			const next = new Set(selectedIds);
 			next.delete(id);
@@ -217,9 +319,6 @@
 		}
 	}
 
-	/**
-	 * @param {string} id
-	 */
 	function toggleSelection(id) {
 		const next = new Set(selectedIds);
 		if (next.has(id)) {
@@ -227,7 +326,7 @@
 		} else {
 			next.add(id);
 		}
-		selectedIds = next; // Reassign to trigger reactivity
+		selectedIds = next;
 	}
 
 	function selectAll() {
@@ -243,23 +342,73 @@
 		selectedIds = new Set();
 	}
 
-	// Helper for indeterminate state
-	/**
-	 * @param {HTMLInputElement} node
-	 * @param {boolean} active
-	 */
 	function indeterminate(node, active) {
 		node.indeterminate = active;
 		return {
-			/**
-			 * @param {boolean} newActive
-			 */
 			update(newActive) {
 				node.indeterminate = newActive;
 			}
 		};
 	}
+
+	function upsertUploadRow(row) {
+		const index = extractedDataItems.findIndex((item) => item.id === row.id);
+		if (index === -1) {
+			extractedDataItems = [row, ...extractedDataItems];
+		} else {
+			const next = [...extractedDataItems];
+			next[index] = { ...next[index], ...row };
+			extractedDataItems = next;
+		}
+		if (lastSuccessfulAccessToken) {
+			void fetchAndStorePreview(row, lastSuccessfulAccessToken);
+		}
+	}
+
+	function removeUploadRow(id) {
+		const next = extractedDataItems.filter((item) => item.id !== id);
+		if (next.length === extractedDataItems.length) return;
+		extractedDataItems = next;
+		const previews = new Map(imagePreviewUrls);
+		const existing = previews.get(id);
+		if (existing) {
+			URL.revokeObjectURL(existing);
+			previews.delete(id);
+			imagePreviewUrls = previews;
+		}
+		if (selectedIds.has(id)) {
+			const nextSelected = new Set(selectedIds);
+			nextSelected.delete(id);
+			selectedIds = nextSelected;
+		}
+	}
+
+	async function fetchAndStorePreview(row, token) {
+		if (!row.imageUrl || !token) return;
+		try {
+			const response = await fetch(row.imageUrl, {
+				headers: {
+					Authorization: `Bearer ${token}`
+				}
+			});
+			if (!response.ok) {
+				return;
+			}
+			const blob = await response.blob();
+			const objectUrl = URL.createObjectURL(blob);
+			const next = new Map(imagePreviewUrls);
+			const previous = next.get(row.id);
+			if (previous) {
+				URL.revokeObjectURL(previous);
+			}
+			next.set(row.id, objectUrl);
+			imagePreviewUrls = next;
+		} catch (error) {
+			console.error(`Failed to update preview for upload ${row.id}`, error);
+		}
+	}
 </script>
+
 
 <div class="flex min-h-screen flex-col bg-background">
 	<Header title="Dashboard"></Header>
@@ -305,19 +454,20 @@
 						</Table.Head>
 						<Table.Head class="w-[100px]">Photo</Table.Head>
 						<Table.Head>Extracted Text</Table.Head>
+						<Table.Head class="w-[180px] text-right">OCR Settings</Table.Head>
 						<Table.Head class="text-right">Remove</Table.Head>
 					</Table.Row>
 				</Table.Header>
 				<Table.Body>
 					{#if isLoading}
 						<Table.Row>
-							<Table.Cell colspan={4} class="h-24 text-center text-sm text-muted-foreground">
+							<Table.Cell colspan={5} class="h-24 text-center text-sm text-muted-foreground">
 								Loading uploads...
 							</Table.Cell>
 						</Table.Row>
 					{:else if fetchError}
 						<Table.Row>
-							<Table.Cell colspan={4} class="h-24 text-center text-sm text-destructive">
+							<Table.Cell colspan={5} class="h-24 text-center text-sm text-destructive">
 								{fetchError}
 							</Table.Cell>
 						</Table.Row>
@@ -360,6 +510,22 @@
 									</p>
 								</Table.Cell>
 
+								<Table.Cell class="text-right align-top">
+									<div class="flex flex-col items-end gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+										<span class="rounded-full border px-2 py-0.5 text-xs">
+											{item.ocrMode === 'high_accuracy' ? 'High accuracy' : 'Fast'}
+										</span>
+										<span class="rounded-full border px-2 py-0.5 text-xs">
+											{item.outputFormat === 'paragraph' ? 'Paragraphs' : 'Raw text'}
+										</span>
+										<span class="rounded-full border px-2 py-0.5 text-xs">
+											{item.autoLanguageDetection ? 'Auto language' : item.languageHint
+												? `Lang: ${item.languageHint}`
+												: 'Manual language'}
+										</span>
+									</div>
+								</Table.Cell>
+
 								<Table.Cell class="text-right">
 									<Button
 										variant="ghost"
@@ -375,7 +541,7 @@
 						{/each}
 						{#if filteredItems.length === 0}
 							<Table.Row>
-								<Table.Cell colspan={4} class="h-24 text-center text-sm text-muted-foreground">
+								<Table.Cell colspan={5} class="h-24 text-center text-sm text-muted-foreground">
 									No uploads match your search.
 								</Table.Cell>
 							</Table.Row>

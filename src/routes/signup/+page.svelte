@@ -25,10 +25,16 @@
 		loading = true;
 		error = '';
 		try {
+			const normalizedEmail = email.trim();
 			const res = await fetch(API_ROUTES.auth.signup, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ name, email, password })
+				body: JSON.stringify({
+					name,
+					email: normalizedEmail,
+					username: normalizedEmail,
+					password
+				})
 			});
 
 			const data = await res.json();
@@ -54,7 +60,8 @@
 	}
 </script>
 
-<div class="flex items-center justify-center min-h-screen bg-gray-50">
+<div class="flex flex-col items-center justify-center min-h-screen bg-gray-50 gap-4 px-4">
+	<p class="text-sm uppercase tracking-[0.2em] text-gray-500 text-center">Yo, get your text instantly.</p>
 	<Card class="w-[380px] shadow-md">
 		<CardHeader class="text-center">
 			<CardTitle class="text-xl">Create an Account</CardTitle>

@@ -27,6 +27,7 @@ export const API_VERSION = normalizeSegment(
 );
 export const API_BASE_URL = `${BACKEND_URL}/api/${API_VERSION}`;
 export const API_TIMEOUT = Number(import.meta.env.VITE_API_TIMEOUT ?? 30000);
+const backendUrlObject = new URL(BACKEND_URL);
 
 /**
  * Builds an absolute URL for resources exposed as relative API paths.
@@ -56,3 +57,15 @@ export const API_ROUTES = {
 		uploads: `${API_BASE_URL}/core/uploads/`
 	}
 } as const;
+
+function normalizeWebSocketPath(path: string) {
+	const cleaned = path.startsWith('/') ? path : `/${path}`;
+	const basePath = backendUrlObject.pathname.replace(/\/$/, '');
+	return `${basePath}${cleaned}`.replace(/\/{2,}/g, '/');
+}
+
+export function buildWebSocketUrl(path = '/') {
+	const normalizedPath = normalizeWebSocketPath(path);
+	const protocol = backendUrlObject.protocol === 'https:' ? 'wss:' : 'ws:';
+	return `${protocol}//${backendUrlObject.host}${normalizedPath}`;
+}
