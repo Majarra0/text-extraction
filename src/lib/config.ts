@@ -64,8 +64,18 @@ function normalizeWebSocketPath(path: string) {
 	return `${basePath}${cleaned}`.replace(/\/{2,}/g, '/');
 }
 
-export function buildWebSocketUrl(path = '/') {
+export function buildWebSocketUrl(
+	path = '/',
+	params?: Record<string, string | number | boolean | undefined | null>
+) {
 	const normalizedPath = normalizeWebSocketPath(path);
 	const protocol = backendUrlObject.protocol === 'https:' ? 'wss:' : 'ws:';
-	return `${protocol}//${backendUrlObject.host}${normalizedPath}`;
+	const url = new URL(`${protocol}//${backendUrlObject.host}${normalizedPath}`);
+	if (params) {
+		for (const [key, value] of Object.entries(params)) {
+			if (value === undefined || value === null) continue;
+			url.searchParams.set(key, String(value));
+		}
+	}
+	return url.toString();
 }

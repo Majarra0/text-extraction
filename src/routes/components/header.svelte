@@ -31,13 +31,11 @@
 		<a
 			href="/"
 			class="flex items-center gap-3 rounded-lg bg-transparent text-left transition hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
+			aria-label={BRAND_NAME}
 		>
 			<ImageIcon class="h-6 w-6 text-[var(--primary)]" />
-			<p class="text-lg font-bold tracking-tight">{BRAND_NAME}</p>
+			<span class="sr-only">{BRAND_NAME}</span>
 		</a>
-		{#if title && title !== BRAND_NAME}
-			<span class="hidden sm:inline text-xs uppercase tracking-wide text-[var(--muted-foreground)]">/ {title}</span>
-		{/if}
 	</div>
 
 	<!-- Optional: Add a slot here if you want to pass buttons (like logout) to the right side -->

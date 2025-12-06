@@ -2,7 +2,7 @@
 	import { slide } from 'svelte/transition';
 	import { onMount, onDestroy } from 'svelte';
 	import Header from './components/header.svelte';
-	import { API_ROUTES, toAbsoluteUrl } from '$lib/config';
+	import { API_ROUTES, toAbsoluteUrl, buildWebSocketUrl } from '$lib/config';
 	import { BRAND_NAME, PRIMARY_TAGLINE } from '$lib/brand';
 
 	type UploadResponse = {
@@ -14,12 +14,33 @@
 		language_hint?: string | null;
 		output_format?: 'raw' | 'paragraph';
 		ocr_mode?: 'fast' | 'high_accuracy';
+		status?: string;
+		streamed_text?: string | null;
+		error?: string | null;
 	};
 	type UploadCard = UploadResponse & { previewObjectUrl?: string | null };
 
-	type ErrorResponse = {
+	type UploadSocketMessage = {
+		type?: string;
 		message?: string;
-		errors?: Record<string, string[] | string>;
+		model?: string;
+		instance_id?: string | null;
+		instance?: UploadResponse | null;
+		duplicate?: boolean;
+		error?: Record<string, string[] | string> | string | null;
+		id?: string;
+		status?: string;
+		streamed_text?: string | null;
+		raw_text?: string | null;
+		processed_text?: string | null;
+		image_url?: string | null;
+	};
+
+	type UploadWebsocketRequest = {
+		auto_language_detection: boolean;
+		language_hint?: string;
+		output_format: 'raw' | 'paragraph';
+		ocr_mode: 'fast' | 'high_accuracy';
 	};
 
 	let selectedFile: File | null = null;
@@ -37,6 +58,8 @@
 	let languageHint = '';
 	let outputFormat: 'raw' | 'paragraph' = 'raw';
 	let ocrMode: 'fast' | 'high_accuracy' = 'fast';
+	const WEBSOCKET_UPLOAD_PATH = '/ws/core/upload/';
+	const WEBSOCKET_TIMEOUT_MS = 60000;
 
 	$: uploadedImageEndpoint = uploadResult?.image_url
 		? toAbsoluteUrl(uploadResult.image_url)
@@ -105,29 +128,27 @@
 
 		uploading = true;
 		uploadError = '';
-		resultText = '⏳ Uploading image...';
+		resultText = '⏳ Connecting to OCR stream...';
 		uploadResult = null;
 
-			try {
-				let activeToken = token;
-				let response = await uploadFile(activeToken, selectedFile);
+		const metadata: UploadWebsocketRequest = {
+			auto_language_detection: autoLanguageDetection,
+			output_format: outputFormat,
+			ocr_mode: ocrMode
+		};
+		if (!autoLanguageDetection && languageHint.trim()) {
+			metadata.language_hint = languageHint.trim();
+		}
 
-			if (response.status === 401) {
-					const refreshed = await refreshAccessToken();
-					if (!refreshed) {
-						throw new Error('Session expired. Please log in again.');
-					}
-					activeToken = refreshed;
-					response = await uploadFile(activeToken, selectedFile);
-				}
+		try {
+			const upload = await createUploadViaWebsocket({
+				file: selectedFile,
+				token,
+				requestData: metadata,
+				onProgress: (status, extras) => handleUploadProgress(status, extras)
+			});
 
-				if (!response.ok) {
-				const message = await buildErrorMessage(response);
-				throw new Error(message);
-			}
-
-			const upload = (await response.json()) as UploadResponse;
-			const uploadWithPreview = await withPreview(upload, activeToken);
+			const uploadWithPreview = await withPreview(upload, token);
 			const updatedHistory = [
 				uploadWithPreview,
 				...recentUploads.filter((item) => item.id !== uploadWithPreview.id)
@@ -142,24 +163,6 @@
 		} finally {
 			uploading = false;
 		}
-	}
-
-	function uploadFile(token: string, file: File) {
-		const formData = new FormData();
-		formData.append('image_file', file);
-		formData.append('auto_language_detection', String(autoLanguageDetection));
-		if (!autoLanguageDetection && languageHint.trim()) {
-			formData.append('language_hint', languageHint.trim());
-		}
-		formData.append('output_format', outputFormat);
-		formData.append('ocr_mode', ocrMode);
-		return fetch(API_ROUTES.core.uploads, {
-			method: 'POST',
-			headers: {
-				Authorization: `Bearer ${token}`
-			},
-			body: formData
-		});
 	}
 
 	async function ensureAccessToken(): Promise<string | null> {
@@ -195,26 +198,225 @@
 		return null;
 	}
 
-	async function buildErrorMessage(response: Response) {
-		const fallback = `Failed to upload image (status ${response.status}).`;
-		try {
-			const data = (await response.json()) as ErrorResponse;
-			if (data?.message) return data.message;
-			if (data?.errors) {
-				for (const value of Object.values(data.errors)) {
-					if (!value) continue;
-					if (Array.isArray(value) && value.length > 0) {
-						return value[0];
-					}
-					if (typeof value === 'string') {
-						return value;
+	function fileToBase64(file: File) {
+		return new Promise<string>((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const result = reader.result;
+				if (typeof result !== 'string') {
+					reject(new Error('Failed to read file.'));
+					return;
+				}
+				const commaIndex = result.indexOf(',');
+				resolve(commaIndex === -1 ? result : result.slice(commaIndex + 1));
+			};
+			reader.onerror = () => {
+				reject(new Error('Failed to read file.'));
+			};
+			reader.readAsDataURL(file);
+		});
+	}
+
+	type UploadSocketCallbacks = {
+		onProgress?: (status: UploadResponse, extras?: { duplicate?: boolean }) => void;
+	};
+
+	type CreateUploadViaWebsocketArgs = {
+		file: File;
+		token: string;
+		requestData: UploadWebsocketRequest;
+		onProgress?: UploadSocketCallbacks['onProgress'];
+	};
+
+	async function createUploadViaWebsocket({
+		file,
+		token,
+		requestData,
+		onProgress
+	}: CreateUploadViaWebsocketArgs) {
+		const wsUrl = buildWebSocketUrl(WEBSOCKET_UPLOAD_PATH, { token });
+		const imageBase64 = await fileToBase64(file);
+		const payloadData: Record<string, unknown> = {
+			image_base64: imageBase64,
+			auto_language_detection: requestData.auto_language_detection,
+			output_format: requestData.output_format,
+			ocr_mode: requestData.ocr_mode
+		};
+		if (requestData.language_hint) {
+			payloadData.language_hint = requestData.language_hint;
+		}
+
+		return new Promise<UploadResponse>((resolve, reject) => {
+			let settled = false;
+			let socket: WebSocket | null = null;
+			let timeoutId: ReturnType<typeof setTimeout>;
+			const cleanup = () => {
+				if (socket) {
+					socket.onopen =
+						socket.onmessage =
+						socket.onerror =
+						socket.onclose =
+							null;
+					if (
+						socket.readyState === WebSocket.OPEN ||
+						socket.readyState === WebSocket.CONNECTING
+					) {
+						socket.close();
 					}
 				}
+				socket = null;
+			};
+			const finishWithError = (message: string) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeoutId);
+				cleanup();
+				reject(new Error(message));
+			};
+			const finishWithSuccess = (data: UploadResponse) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeoutId);
+				cleanup();
+				resolve(data);
+			};
+
+			timeoutId = window.setTimeout(() => {
+				finishWithError('Upload timed out. Please try again.');
+			}, WEBSOCKET_TIMEOUT_MS);
+
+			const handleProgress = (status: UploadResponse, extras?: { duplicate?: boolean }) => {
+				onProgress?.(status, extras);
+			};
+
+			try {
+				socket = new WebSocket(wsUrl);
+			} catch (error) {
+				finishWithError('Failed to open WebSocket connection.');
+				return;
 			}
-		} catch (err) {
-			console.error('Failed to parse error response:', err);
+
+			socket.onopen = () => {
+				try {
+					socket?.send(JSON.stringify({ type: 'subscribe' }));
+					socket?.send(JSON.stringify({ type: 'create', data: payloadData }));
+				} catch (error) {
+					console.error('Failed to send create payload', error);
+					finishWithError('Unable to send upload payload.');
+				}
+			};
+
+			socket.onerror = () => {
+				finishWithError('WebSocket error while uploading image.');
+			};
+
+			socket.onclose = () => {
+				if (!settled) {
+					finishWithError('Connection closed before upload completed.');
+				}
+			};
+
+			socket.onmessage = (event) => {
+				let payload: UploadSocketMessage;
+				try {
+					payload = JSON.parse(event.data) as UploadSocketMessage;
+				} catch (error) {
+					console.error('Failed to parse websocket payload', error);
+					return;
+				}
+
+				if (!payload?.type) {
+					return;
+				}
+
+				if (payload.type === 'Upload.created') {
+					if (payload.error) {
+						const message = normalizeSocketError(payload.error);
+						finishWithError(message);
+						return;
+					}
+					const upload = extractUploadFromPayload(payload);
+					if (!upload) return;
+					handleProgress(upload, { duplicate: payload.duplicate ?? false });
+					if (payload.duplicate) {
+						finishWithSuccess(upload);
+					}
+					return;
+				}
+
+				if (payload.type === 'Upload.status') {
+					const upload = extractUploadFromPayload(payload);
+					if (!upload) return;
+					handleProgress(upload);
+					const status = upload.status?.toLowerCase();
+					if (status === 'processed') {
+						finishWithSuccess(upload);
+					} else if (status === 'error') {
+						const errorMessage = upload.error ?? normalizeSocketError(payload.error);
+						finishWithError(errorMessage || 'Upload failed.');
+					}
+					return;
+				}
+
+				if (payload.error) {
+					const message = normalizeSocketError(payload.error);
+					finishWithError(message);
+				}
+			};
+		});
+	}
+
+	function extractUploadFromPayload(payload: UploadSocketMessage): UploadResponse | null {
+		if (payload.instance) {
+			return payload.instance;
 		}
-		return fallback;
+		if (!payload.id) {
+			return null;
+		}
+		return {
+			id: payload.id,
+			status: payload.status,
+			streamed_text: payload.streamed_text,
+			raw_text: payload.raw_text,
+			processed_text: payload.processed_text,
+			image_url: payload.image_url
+		};
+	}
+
+	function handleUploadProgress(status: UploadResponse, extras?: { duplicate?: boolean }) {
+		const stage = status.status?.toLowerCase();
+		if (extras?.duplicate) {
+			resultText =
+				status.processed_text ||
+				status.raw_text ||
+				'Duplicate detected. Returning the most recent OCR output.';
+			return;
+		}
+		if (stage === 'processing') {
+			resultText =
+				status.streamed_text ||
+				status.raw_text ||
+				'Processing upload and streaming intermediate OCR results...';
+			return;
+		}
+		if (stage === 'pending' || !stage) {
+			resultText = 'Upload created. Waiting for OCR worker to start.';
+		}
+	}
+
+	function normalizeSocketError(error: Record<string, string[] | string> | string | null | undefined) {
+		if (!error) return 'Upload failed.';
+		if (typeof error === 'string') return error;
+		const messages: string[] = [];
+		for (const [field, value] of Object.entries(error)) {
+			if (!value) continue;
+			if (Array.isArray(value) && value.length > 0) {
+				messages.push(`${field}: ${value.join(', ')}`);
+			} else if (typeof value === 'string') {
+				messages.push(`${field}: ${value}`);
+			}
+		}
+		return messages.length > 0 ? messages.join(' ') : 'Upload failed.';
 	}
 
 	function createResultMessage(upload: UploadResponse) {
@@ -299,53 +501,13 @@
 		}
 	}
 
-	async function withPreview(upload: UploadResponse, token?: string | null): Promise<UploadCard> {
-		const previewObjectUrl = await fetchPreviewObjectUrl(upload.image_url, token);
-		return { ...upload, previewObjectUrl };
-	}
-
-	async function fetchPreviewObjectUrl(
-		imageUrl?: string | null,
-		tokenOverride?: string | null
-	): Promise<string | null> {
-		if (!imageUrl) return null;
-		const token = tokenOverride ?? (await ensureAccessToken());
-		if (!token) {
-			return null;
-		}
-		try {
-			const response = await fetch(toAbsoluteUrl(imageUrl), {
-				headers: { Authorization: `Bearer ${token}` }
-			});
-			if (!response.ok) {
-				return null;
-			}
-			const blob = await response.blob();
-			return URL.createObjectURL(blob);
-		} catch (error) {
-			console.error('Failed to fetch preview image', error);
-			return null;
-		}
-	}
-
-	async function ensurePreviewForUpload(upload: UploadCard) {
-		if (upload.previewObjectUrl) return upload.previewObjectUrl;
-		const preview = await fetchPreviewObjectUrl(upload.image_url);
-		if (preview) {
-			upload.previewObjectUrl = preview;
-			recentUploads = [...recentUploads];
-		}
-		return preview;
+	async function withPreview(upload: UploadResponse): Promise<UploadCard> {
+		return { ...upload, previewObjectUrl: null };
 	}
 
 	async function previewUploadedImage(upload: UploadCard | null) {
-		if (!upload) return;
-		const preview = await ensurePreviewForUpload(upload);
-		if (!preview) {
-			uploadError = 'Unable to load image preview. Please try again.';
-			return;
-		}
-		window.open(preview, '_blank', 'noopener,noreferrer');
+		if (!upload || !upload.image_url) return;
+		window.open(toAbsoluteUrl(upload.image_url), '_blank', 'noopener,noreferrer');
 	}
 </script>
 
@@ -520,8 +682,8 @@
 		</div>
 	</section>
 
-{#if resultText}
-		<section class="w-full px-6 mt-16" aria-live="polite">
+	{#if resultText}
+		<section class="w-full px-6 mt-8" aria-live="polite">
 			<div
 				transition:slide
 				class="mx-auto mt-4 w-full max-w-3xl bg-[var(--card)] shadow-xl rounded-2xl p-6 border border-[var(--border)] text-[var(--foreground)]"

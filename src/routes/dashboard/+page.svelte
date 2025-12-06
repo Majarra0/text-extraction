@@ -25,9 +25,33 @@
 	 * 	languageHint: string | null;
 	 * 	outputFormat: 'raw' | 'paragraph';
 	 * 	ocrMode: 'fast' | 'high_accuracy';
-	 * 	imageUrl: string;
-	 * 	extractedText: string;
-	 * }} UploadRow
+ * 	imageUrl: string;
+ * 	extractedText: string;
+ * }} UploadRow
+ *
+ * @typedef {{
+ * 	id?: string;
+ * 	email?: string;
+ * 	username?: string;
+ * 	role?: string;
+ * 	last_ip?: string | null;
+ * 	name?: string;
+	 * }} StoredUser
+	 */
+
+	/**
+	 * @typedef {{
+	 * 	type?: string;
+	 * 	list?: UploadResponse[];
+	 * 	instance?: UploadResponse | null;
+	 * 	instance_id?: string | null;
+	 * 	id?: string;
+	 * 	status?: string;
+	 * 	streamed_text?: string | null;
+	 * 	processed_text?: string | null;
+	 * 	raw_text?: string | null;
+	 * 	image_url?: string | null;
+	 * }} UploadSocketMessage
 	 */
 
 	/**
@@ -62,31 +86,49 @@
 	let searchQuery = $state('');
 	let isLoading = $state(true);
 	let fetchError = $state('');
+	let deleteError = $state('');
 	/** @type {Map<string, string>} */
 	let imagePreviewUrls = $state(new Map());
+	/** @type {StoredUser | null} */
+	let accountInfo = $state(null);
 	let lastSuccessfulAccessToken = null;
-	const websocketConnections = new Map();
-	const websocketRetryTimers = new Map();
+	let uploadsSocket = null;
+	let uploadsSocketReconnectTimer = null;
 	let dashboardDestroyed = false;
 	const WEBSOCKET_RECONNECT_DELAY = 4000;
+	const WEBSOCKET_UPLOADS_PATH = '/ws/core/upload/';
 
 	onMount(() => {
+		loadAccountInfo();
 		void initializeDashboard();
 	});
 	onDestroy(() => {
 		dashboardDestroyed = true;
 		clearImagePreviews();
-		cleanupWebsockets();
+		teardownUploadsSocket();
 	});
 
 	async function initializeDashboard() {
+		isLoading = true;
+		fetchError = '';
 		const token = await ensureAccessToken();
 		if (!token) {
 			isLoading = false;
 			redirectToLogin();
 			return;
 		}
-		await loadUploads(token);
+		lastSuccessfulAccessToken = token;
+		connectUploadsSocket(token);
+	}
+
+	function loadAccountInfo() {
+		try {
+			const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('user') : null;
+			accountInfo = stored ? JSON.parse(stored) : null;
+		} catch (error) {
+			console.warn('Failed to parse stored user payload', error);
+			accountInfo = null;
+		}
 	}
 
 	async function ensureAccessToken() {
@@ -122,138 +164,117 @@
 		return null;
 	}
 
-	async function loadUploads(token) {
-		isLoading = true;
-		fetchError = '';
-
+	function connectUploadsSocket(token) {
+		teardownUploadsSocket();
+		const wsUrl = buildWebSocketUrl(WEBSOCKET_UPLOADS_PATH, { token });
 		try {
-			let authToken = token;
-			let response = await fetchUploads(authToken);
-
-			if (response?.status === 401) {
-				const refreshed = await refreshAccessToken();
-				if (!refreshed) {
-					redirectToLogin();
-					return;
-				}
-
-				authToken = refreshed;
-				response = await fetchUploads(authToken);
-			}
-
-			if (!response || !response.ok) {
-				throw new Error('Failed to load uploads. Please try again.');
-			}
-
-			const uploads = /** @type {UploadResponse[]} */ (await response.json());
-
-			extractedDataItems = uploads.map(mapUploadToRow);
-			lastSuccessfulAccessToken = authToken;
-			await preloadImagePreviews(extractedDataItems, authToken);
-			selectedIds = new Set();
-			syncWebsocketSubscriptions(extractedDataItems);
+			uploadsSocket = new WebSocket(wsUrl);
 		} catch (error) {
-			console.error('Failed to fetch uploads:', error);
-			const message = error instanceof Error ? error.message : 'Unable to load uploads.';
-			fetchError = message;
-		} finally {
-			isLoading = false;
+			console.error('Failed to initialize uploads websocket', error);
+			scheduleUploadsReconnect();
+			return;
 		}
-	}
-
-	function fetchUploads(token) {
-		return fetch(API_ROUTES.core.uploads, {
-			headers: {
-				Authorization: `Bearer ${token}`
+		uploadsSocket.onopen = () => {
+			try {
+				uploadsSocket?.send(JSON.stringify({ type: 'subscribe' }));
+				uploadsSocket?.send(JSON.stringify({ type: 'list' }));
+			} catch (error) {
+				console.error('Failed to request uploads list', error);
 			}
-		});
+		};
+		uploadsSocket.onmessage = (event) => {
+			void handleUploadsSocketMessage(event, token);
+		};
+		uploadsSocket.onerror = () => {
+			uploadsSocket?.close();
+		};
+		uploadsSocket.onclose = () => {
+			if (dashboardDestroyed) return;
+			scheduleUploadsReconnect();
+		};
 	}
 
-	function syncWebsocketSubscriptions(items) {
-		const ids = new Set(items.map((item) => item.id));
-		for (const id of websocketConnections.keys()) {
-			if (!ids.has(id)) {
-				unsubscribeFromUpload(id);
+	function scheduleUploadsReconnect() {
+		if (uploadsSocketReconnectTimer || dashboardDestroyed) return;
+		uploadsSocketReconnectTimer = setTimeout(async () => {
+			uploadsSocketReconnectTimer = null;
+			const refreshed = await ensureAccessToken();
+			if (!refreshed) {
+				redirectToLogin();
+				return;
 			}
-		}
-		for (const id of ids) {
-			subscribeToUpload(id);
-		}
-	}
-
-	function subscribeToUpload(id) {
-		if (dashboardDestroyed || websocketConnections.has(id)) return;
-		const wsUrl = buildWebSocketUrl(`/ws/core/Upload/${id}/`);
-		try {
-			const socket = new WebSocket(wsUrl);
-			websocketConnections.set(id, socket);
-			socket.onopen = () => {
-				try {
-					socket.send(JSON.stringify({ type: 'subscribe' }));
-				} catch (error) {
-					console.warn('Failed to send subscribe message', error);
-				}
-			};
-			socket.onmessage = (event) => handleSocketMessage(id, event);
-			socket.onerror = () => {
-				socket.close();
-			};
-			socket.onclose = () => handleSocketClose(id);
-		} catch (error) {
-			console.error(`Failed to connect to websocket for upload ${id}`, error);
-		}
-	}
-
-	function handleSocketClose(id) {
-		websocketConnections.delete(id);
-		if (dashboardDestroyed) return;
-		if (websocketRetryTimers.has(id)) return;
-		const timer = setTimeout(() => {
-			websocketRetryTimers.delete(id);
-			subscribeToUpload(id);
+			lastSuccessfulAccessToken = refreshed;
+			connectUploadsSocket(refreshed);
 		}, WEBSOCKET_RECONNECT_DELAY);
-		websocketRetryTimers.set(id, timer);
 	}
 
-	function unsubscribeFromUpload(id) {
-		const socket = websocketConnections.get(id);
-		if (socket) {
-			socket.onclose = null;
-			socket.close();
-			websocketConnections.delete(id);
+	function teardownUploadsSocket() {
+		if (uploadsSocketReconnectTimer) {
+			clearTimeout(uploadsSocketReconnectTimer);
+			uploadsSocketReconnectTimer = null;
 		}
-		const timer = websocketRetryTimers.get(id);
-		if (timer) {
-			clearTimeout(timer);
-			websocketRetryTimers.delete(id);
+		if (uploadsSocket) {
+			uploadsSocket.onopen = uploadsSocket.onclose = uploadsSocket.onmessage = uploadsSocket.onerror = null;
+			uploadsSocket.close();
+			uploadsSocket = null;
 		}
 	}
 
-	function cleanupWebsockets() {
-		for (const id of websocketConnections.keys()) {
-			unsubscribeFromUpload(id);
-		}
-	}
-
-	function handleSocketMessage(id, event) {
+	async function handleUploadsSocketMessage(event, token) {
 		let payload;
 		try {
 			payload = JSON.parse(event.data);
 		} catch (error) {
-			console.error('Failed to parse websocket payload', error);
+			console.error('Failed to parse uploads websocket payload', error);
 			return;
 		}
-		if (!payload || payload.type !== 'Upload.status') {
+		if (!payload?.type) {
 			return;
 		}
-		if (!payload.instance) {
-			removeUploadRow(id);
-			unsubscribeFromUpload(id);
+
+		if (payload.type === 'Upload.list') {
+			const uploads = Array.isArray(payload.list) ? payload.list : [];
+			extractedDataItems = uploads.map(mapUploadToRow);
+			lastSuccessfulAccessToken = token;
+			await preloadImagePreviews(extractedDataItems, token);
+			selectedIds = new Set();
+			isLoading = false;
+			fetchError = '';
 			return;
 		}
-		const mapped = mapUploadToRow(payload.instance);
-		upsertUploadRow(mapped);
+
+		if (payload.type === 'Upload.created' || payload.type === 'Upload.updated' || payload.type === 'Upload.status') {
+			const upload = extractUploadFromSocket(payload);
+			if (!upload) return;
+			supsertUploadRow(mapUploadToRow(upload));
+			return;
+		}
+
+		if (payload.type === 'Upload.deleted') {
+			const targetId = payload.instance?.id ?? payload.instance_id ?? payload.id;
+			if (targetId) {
+				removeUploadRow(targetId);
+			}
+		}
 	}
+
+	function extractUploadFromSocket(payload) {
+		if (payload.instance) {
+			return payload.instance;
+		}
+		if (!payload.id) {
+			return null;
+		}
+		return {
+			id: payload.id,
+			image_url: payload.image_url,
+			processed_text: payload.processed_text,
+			raw_text: payload.raw_text ?? payload.streamed_text,
+			streamed_text: payload.streamed_text,
+			status: payload.status
+		};
+	}
+
 
 	async function preloadImagePreviews(items, token) {
 		clearImagePreviews();
@@ -310,12 +331,14 @@
 		)
 	);
 
-	function handleRemove(id) {
-		extractedDataItems = extractedDataItems.filter((item) => item.id !== id);
-		if (selectedIds.has(id)) {
-			const next = new Set(selectedIds);
-			next.delete(id);
-			selectedIds = next;
+	async function handleRemove(id) {
+		deleteError = '';
+		try {
+			await deleteUploadInstance(id);
+			removeUploadRow(id);
+		} catch (error) {
+			console.error('Failed to delete upload', error);
+			deleteError = error instanceof Error ? error.message : 'Failed to delete upload.';
 		}
 	}
 
@@ -337,9 +360,23 @@
 		}
 	}
 
-	function removeSelected() {
-		extractedDataItems = extractedDataItems.filter((item) => !selectedIds.has(item.id));
-		selectedIds = new Set();
+	async function removeSelected() {
+		if (selectedIds.size === 0) return;
+		deleteError = '';
+		const ids = Array.from(selectedIds);
+		const failures = [];
+		for (const id of ids) {
+			try {
+				await deleteUploadInstance(id);
+				removeUploadRow(id);
+			} catch (error) {
+				console.error(`Failed to delete upload ${id}`, error);
+				failures.push(error instanceof Error ? error.message : 'Failed to delete upload.');
+			}
+		}
+		if (failures.length > 0) {
+			deleteError = failures[0];
+		}
 	}
 
 	function indeterminate(node, active) {
@@ -407,12 +444,68 @@
 			console.error(`Failed to update preview for upload ${row.id}`, error);
 		}
 	}
+
+	async function deleteUploadInstance(id) {
+		const payload = JSON.stringify({ type: 'delete', instance_id: id });
+		if (uploadsSocket && uploadsSocket.readyState === WebSocket.OPEN) {
+			try {
+				uploadsSocket.send(payload);
+				return;
+			} catch (error) {
+				console.error('Failed to send delete command via websocket', error);
+			}
+		}
+
+		const token = await ensureAccessToken();
+		if (!token) {
+			throw new Error('Session expired. Please log in again.');
+		}
+
+		const response = await fetch(`${API_ROUTES.core.uploads}${id}/`, {
+			method: 'DELETE',
+			headers: {
+				Authorization: `Bearer ${token}`
+			}
+		});
+
+		if (!response.ok) {
+			let message = 'Failed to delete upload.';
+			try {
+				const data = await response.json();
+				if (typeof data?.detail === 'string') {
+					message = data.detail;
+				} else if (typeof data?.error === 'string') {
+					message = data.error;
+				}
+			} catch {
+				// ignore JSON parsing errors
+			}
+			throw new Error(message);
+		}
+	}
 </script>
 
 
 <div class="flex min-h-screen flex-col bg-background">
-	<Header title="Dashboard"></Header>
+	<Header title={accountInfo?.name ?? 'Dashboard'}></Header>
 	<main class="flex-1 p-6 max-w-5xl mx-auto">
+		{#if accountInfo?.email}
+			<section
+				class="mb-6 rounded-3xl border border-[var(--border)] bg-[var(--card)]/80 p-6 text-sm shadow-sm"
+			>
+				<p class="text-xs uppercase tracking-wide text-[var(--muted-foreground)]">Account email</p>
+				<p class="mt-1 text-lg font-semibold text-[var(--foreground)]">
+					{accountInfo.email}
+				</p>
+			</section>
+		{/if}
+
+		{#if deleteError}
+			<div class="mb-4 rounded-2xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+				{deleteError}
+			</div>
+		{/if}
+
 		<!-- Search bar and bulk actions -->
 		<div class="mb-4 flex items-center justify-between">
 			<div class="relative w-full max-w-xs">
