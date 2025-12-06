@@ -476,7 +476,7 @@
 
 <div class="flex min-h-screen flex-col bg-background">
 	<Header title={accountInfo?.name ?? 'Dashboard'}></Header>
-	<main class="flex-1 p-6 max-w-5xl mx-auto">
+	<main class="flex-1 p-6 w-full max-w-5xl mx-auto">
 		{#if accountInfo?.email}
 			<section
 				class="mb-6 rounded-3xl border border-[var(--border)] bg-[var(--card)]/80 p-6 text-sm shadow-sm"
@@ -567,12 +567,14 @@
 									{#if imagePreviewUrls.get(item.id)}
 										<img
 											src={imagePreviewUrls.get(item.id)}
+											loading="lazy"
 											alt="Source"
 											class="aspect-square h-16 w-16 rounded-md object-cover border"
 										/>
 									{:else if hasDisplayableImage(item.imageUrl)}
 										<img
 											src={item.imageUrl}
+											loading="lazy"
 											alt="Source"
 											class="aspect-square h-16 w-16 rounded-md object-cover border"
 										/>

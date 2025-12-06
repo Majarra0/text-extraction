@@ -758,6 +758,7 @@
 	}
 
 	function triggerFileDialog() {
+		
 		const input = document.getElementById('image-upload') as HTMLInputElement | null;
 		input?.click();
 	}
@@ -868,6 +869,7 @@
 		}
 		activeUploadSocket = null;
 	}
+
 
 </script>
 
