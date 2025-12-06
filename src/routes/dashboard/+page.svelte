@@ -5,7 +5,13 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Table from '$lib/components/ui/table';
 	import Header from '../components/header.svelte';
-	import { API_ROUTES, toAbsoluteUrl, buildWebSocketUrl } from '$lib/config';
+	import { API_ROUTES, toAbsoluteUrl } from '$lib/config';
+	import {
+		UploadSocketCommands,
+		createUploadsWebSocket,
+		sendUploadCommand
+	} from '$lib/api/uploadsSocket';
+	import { notifySuccess } from '$lib/stores/notifications';
 
 	/**
 	 * @typedef {{
@@ -96,7 +102,6 @@
 	let uploadsSocketReconnectTimer = null;
 	let dashboardDestroyed = false;
 	const WEBSOCKET_RECONNECT_DELAY = 4000;
-	const WEBSOCKET_UPLOADS_PATH = '/ws/core/upload/';
 
 	onMount(() => {
 		loadAccountInfo();
@@ -166,21 +171,23 @@
 
 	function connectUploadsSocket(token) {
 		teardownUploadsSocket();
-		const wsUrl = buildWebSocketUrl(WEBSOCKET_UPLOADS_PATH, { token });
 		try {
-			uploadsSocket = new WebSocket(wsUrl);
+			uploadsSocket = createUploadsWebSocket(token);
 		} catch (error) {
 			console.error('Failed to initialize uploads websocket', error);
 			scheduleUploadsReconnect();
 			return;
 		}
 		uploadsSocket.onopen = () => {
-			try {
-				uploadsSocket?.send(JSON.stringify({ type: 'subscribe' }));
-				uploadsSocket?.send(JSON.stringify({ type: 'list' }));
-			} catch (error) {
-				console.error('Failed to request uploads list', error);
-			}
+			const sendInitialCommands = async () => {
+				try {
+					await sendUploadCommand(uploadsSocket, UploadSocketCommands.subscribe());
+					await sendUploadCommand(uploadsSocket, UploadSocketCommands.list());
+				} catch (error) {
+					console.error('Failed to request uploads list', error);
+				}
+			};
+			void sendInitialCommands();
 		};
 		uploadsSocket.onmessage = (event) => {
 			void handleUploadsSocketMessage(event, token);
@@ -336,6 +343,7 @@
 		try {
 			await deleteUploadInstance(id);
 			removeUploadRow(id);
+			notifySuccess('Upload deleted successfully.');
 		} catch (error) {
 			console.error('Failed to delete upload', error);
 			deleteError = error instanceof Error ? error.message : 'Failed to delete upload.';
@@ -365,10 +373,12 @@
 		deleteError = '';
 		const ids = Array.from(selectedIds);
 		const failures = [];
+		let successCount = 0;
 		for (const id of ids) {
 			try {
 				await deleteUploadInstance(id);
 				removeUploadRow(id);
+				successCount += 1;
 			} catch (error) {
 				console.error(`Failed to delete upload ${id}`, error);
 				failures.push(error instanceof Error ? error.message : 'Failed to delete upload.');
@@ -376,6 +386,10 @@
 		}
 		if (failures.length > 0) {
 			deleteError = failures[0];
+		}
+		if (successCount > 0) {
+			const label = successCount === 1 ? 'upload' : 'uploads';
+			notifySuccess(`Deleted ${successCount} ${label}.`);
 		}
 	}
 
@@ -446,40 +460,14 @@
 	}
 
 	async function deleteUploadInstance(id) {
-		const payload = JSON.stringify({ type: 'delete', instance_id: id });
-		if (uploadsSocket && uploadsSocket.readyState === WebSocket.OPEN) {
-			try {
-				uploadsSocket.send(payload);
-				return;
-			} catch (error) {
-				console.error('Failed to send delete command via websocket', error);
-			}
-		}
-
-		const token = await ensureAccessToken();
-		if (!token) {
-			throw new Error('Session expired. Please log in again.');
-		}
-
-		const response = await fetch(`${API_ROUTES.core.uploads}${id}/`, {
-			method: 'DELETE',
-			headers: {
-				Authorization: `Bearer ${token}`
-			}
-		});
-
-		if (!response.ok) {
-			let message = 'Failed to delete upload.';
-			try {
-				const data = await response.json();
-				if (typeof data?.detail === 'string') {
-					message = data.detail;
-				} else if (typeof data?.error === 'string') {
-					message = data.error;
-				}
-			} catch {
-				// ignore JSON parsing errors
-			}
+		try {
+			await sendUploadCommand(uploadsSocket, UploadSocketCommands.delete(id));
+		} catch (error) {
+			console.error('Failed to send delete command via websocket', error);
+			const message =
+				error instanceof Error
+					? error.message
+					: 'Unable to send delete command. Please try again once the connection is stable.';
 			throw new Error(message);
 		}
 	}

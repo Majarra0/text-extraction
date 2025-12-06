@@ -2,8 +2,15 @@
 	import { slide } from 'svelte/transition';
 	import { onMount, onDestroy } from 'svelte';
 	import Header from './components/header.svelte';
-	import { API_ROUTES, toAbsoluteUrl, buildWebSocketUrl } from '$lib/config';
+	import { API_ROUTES, toAbsoluteUrl } from '$lib/config';
 	import { BRAND_NAME, PRIMARY_TAGLINE } from '$lib/brand';
+	import {
+		createUploadsWebSocket,
+		sendUploadCommand,
+		UploadSocketCommands,
+		ensureUploadsSocketReady
+	} from '$lib/api/uploadsSocket';
+	import { notifySuccess } from '$lib/stores/notifications';
 
 	type UploadResponse = {
 		id: string;
@@ -34,6 +41,9 @@
 		raw_text?: string | null;
 		processed_text?: string | null;
 		image_url?: string | null;
+		answer?: string | null;
+		response?: string | null;
+		data?: Record<string, unknown> | null;
 	};
 
 	type UploadWebsocketRequest = {
@@ -43,8 +53,16 @@
 		ocr_mode: 'fast' | 'high_accuracy';
 	};
 
+	type ChatMessageRole = 'user' | 'assistant' | 'system';
+	type ChatMessage = {
+		id: string;
+		role: ChatMessageRole;
+		text: string;
+	};
+
 	let selectedFile: File | null = null;
 	let previewUrl: string | null = null;
+	let retainedPreviewUrl: string | null = null;
 	let isDragOver = false;
 	let dragDepth = 0;
 	let resultText = '';
@@ -58,8 +76,16 @@
 	let languageHint = '';
 	let outputFormat: 'raw' | 'paragraph' = 'raw';
 	let ocrMode: 'fast' | 'high_accuracy' = 'fast';
-	const WEBSOCKET_UPLOAD_PATH = '/ws/core/upload/';
+	let chatMessages: ChatMessage[] = [];
+	let chatInput = '';
+	let chatSending = false;
+	let chatError = '';
+	let activeUploadSocket: WebSocket | null = null;
+	let pendingQuestionResolve: ((answer: string) => void) | null = null;
+	let pendingQuestionReject: ((error: Error) => void) | null = null;
+	let pendingQuestionTimeout: ReturnType<typeof setTimeout> | null = null;
 	const WEBSOCKET_TIMEOUT_MS = 60000;
+	const QUESTION_TIMEOUT_MS = 20000;
 
 	$: uploadedImageEndpoint = uploadResult?.image_url
 		? toAbsoluteUrl(uploadResult.image_url)
@@ -75,6 +101,8 @@
 	});
 	onDestroy(() => {
 		revokePreview();
+		revokeRetainedPreview();
+		teardownActiveUploadSocket();
 		recentUploads.forEach((item) => cleanupUploadPreview(item));
 	});
 
@@ -85,6 +113,13 @@
 		}
 	}
 
+	function revokeRetainedPreview() {
+		if (retainedPreviewUrl) {
+			URL.revokeObjectURL(retainedPreviewUrl);
+			retainedPreviewUrl = null;
+		}
+	}
+
 	function handleFileChange(event: Event) {
 		const target = event.target as HTMLInputElement | null;
 		if (!target) return;
@@ -92,23 +127,33 @@
 		resultText = '';
 		uploadError = '';
 		uploadResult = null;
+		resetChatState();
 	}
 
 	function setSelectedFile(file: File | null) {
 		revokePreview();
+		revokeRetainedPreview();
 		selectedFile = file;
 		if (file) {
 			previewUrl = URL.createObjectURL(file);
 		}
 	}
 
-	function clearSelectedFile(options: { preserveFeedback?: boolean } = {}) {
-		const { preserveFeedback = false } = options;
-		setSelectedFile(null);
+	function clearSelectedFile(options: { preserveFeedback?: boolean; retainPreview?: boolean } = {}) {
+		const { preserveFeedback = false, retainPreview = false } = options;
+		if (retainPreview && previewUrl) {
+			retainedPreviewUrl = previewUrl;
+			previewUrl = null;
+		} else {
+			revokePreview();
+			revokeRetainedPreview();
+		}
+		selectedFile = null;
 		if (!preserveFeedback) {
 			resultText = '';
 			uploadError = '';
 			uploadResult = null;
+			resetChatState();
 		}
 		const input = document.getElementById('image-upload') as HTMLInputElement | null;
 		if (input) input.value = '';
@@ -156,7 +201,9 @@
 			recentUploads = updatedHistory;
 			uploadResult = uploadWithPreview;
 			resultText = createResultMessage(uploadWithPreview);
-			clearSelectedFile({ preserveFeedback: true });
+			notifySuccess('Upload processed successfully.');
+			resetChatState();
+			clearSelectedFile({ preserveFeedback: true, retainPreview: true });
 		} catch (error) {
 			uploadError = error instanceof Error ? error.message : 'Failed to upload image.';
 			resultText = '';
@@ -234,7 +281,7 @@
 		requestData,
 		onProgress
 	}: CreateUploadViaWebsocketArgs) {
-		const wsUrl = buildWebSocketUrl(WEBSOCKET_UPLOAD_PATH, { token });
+		teardownActiveUploadSocket();
 		const imageBase64 = await fileToBase64(file);
 		const payloadData: Record<string, unknown> = {
 			image_base64: imageBase64,
@@ -246,42 +293,44 @@
 			payloadData.language_hint = requestData.language_hint;
 		}
 
-		return new Promise<UploadResponse>((resolve, reject) => {
-			let settled = false;
-			let socket: WebSocket | null = null;
-			let timeoutId: ReturnType<typeof setTimeout>;
-			const cleanup = () => {
-				if (socket) {
-					socket.onopen =
-						socket.onmessage =
-						socket.onerror =
-						socket.onclose =
-							null;
-					if (
-						socket.readyState === WebSocket.OPEN ||
-						socket.readyState === WebSocket.CONNECTING
-					) {
-						socket.close();
+			return new Promise<UploadResponse>((resolve, reject) => {
+				let settled = false;
+				let socket: WebSocket | null = null;
+				let timeoutId: ReturnType<typeof setTimeout>;
+				const cleanup = (shouldClose = true) => {
+					if (socket) {
+						socket.onopen =
+							socket.onmessage =
+							socket.onerror =
+							socket.onclose =
+								null;
+						if (
+							shouldClose &&
+							(socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+						) {
+							socket.close();
+						}
 					}
-				}
-				socket = null;
-			};
-			const finishWithError = (message: string) => {
-				if (settled) return;
-				settled = true;
+					if (shouldClose && activeUploadSocket === socket) {
+						activeUploadSocket = null;
+					}
+					socket = null;
+				};
+				const finishWithError = (message: string) => {
+					if (settled) return;
+					settled = true;
 				clearTimeout(timeoutId);
 				cleanup();
 				reject(new Error(message));
 			};
-			const finishWithSuccess = (data: UploadResponse) => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeoutId);
-				cleanup();
-				resolve(data);
-			};
+				const finishWithSuccess = (data: UploadResponse) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timeoutId);
+					resolve(data);
+				};
 
-			timeoutId = window.setTimeout(() => {
+			timeoutId = setTimeout(() => {
 				finishWithError('Upload timed out. Please try again.');
 			}, WEBSOCKET_TIMEOUT_MS);
 
@@ -289,32 +338,40 @@
 				onProgress?.(status, extras);
 			};
 
-			try {
-				socket = new WebSocket(wsUrl);
-			} catch (error) {
-				finishWithError('Failed to open WebSocket connection.');
-				return;
-			}
+				try {
+					socket = createUploadsWebSocket(token);
+					activeUploadSocket = socket;
+				} catch (error) {
+					finishWithError('Failed to open WebSocket connection.');
+					return;
+				}
 
 			socket.onopen = () => {
-				try {
-					socket?.send(JSON.stringify({ type: 'subscribe' }));
-					socket?.send(JSON.stringify({ type: 'create', data: payloadData }));
-				} catch (error) {
-					console.error('Failed to send create payload', error);
-					finishWithError('Unable to send upload payload.');
-				}
+				const initializeUpload = async () => {
+					try {
+						await sendUploadCommand(socket, UploadSocketCommands.subscribe());
+						await sendUploadCommand(socket, UploadSocketCommands.create(payloadData));
+					} catch (error) {
+						console.error('Failed to send create payload', error);
+						finishWithError('Unable to send upload payload.');
+					}
+				};
+				void initializeUpload();
 			};
 
-			socket.onerror = () => {
-				finishWithError('WebSocket error while uploading image.');
-			};
+				socket.onerror = () => {
+					finishWithError('WebSocket error while uploading image.');
+				};
 
-			socket.onclose = () => {
-				if (!settled) {
-					finishWithError('Connection closed before upload completed.');
-				}
-			};
+				socket.onclose = () => {
+					if (activeUploadSocket === socket) {
+						activeUploadSocket = null;
+						handlePendingQuestionFailure('Live connection closed.');
+					}
+					if (!settled) {
+						finishWithError('Connection closed before upload completed.');
+					}
+				};
 
 			socket.onmessage = (event) => {
 				let payload: UploadSocketMessage;
@@ -326,6 +383,10 @@
 				}
 
 				if (!payload?.type) {
+					return;
+				}
+
+				if (handleQuestionResponseFromSocket(payload)) {
 					return;
 				}
 
@@ -357,7 +418,7 @@
 					}
 					return;
 				}
-
+				
 				if (payload.error) {
 					const message = normalizeSocketError(payload.error);
 					finishWithError(message);
@@ -417,6 +478,203 @@
 			}
 		}
 		return messages.length > 0 ? messages.join(' ') : 'Upload failed.';
+	}
+
+	function resetChatState() {
+		chatMessages = [];
+		chatInput = '';
+		chatError = '';
+		chatSending = false;
+		handlePendingQuestionFailure('Question cancelled.');
+	}
+
+	function createChatMessage(role: ChatMessageRole, text: string): ChatMessage {
+		const id =
+			typeof crypto !== 'undefined' && 'randomUUID' in crypto
+				? crypto.randomUUID()
+				: `${role}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		return {
+			id,
+			role,
+			text: text.trim()
+		};
+	}
+
+	function appendChatMessage(message: ChatMessage) {
+		chatMessages = [...chatMessages, message];
+	}
+
+	function handleChatKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter' && !event.shiftKey) {
+			event.preventDefault();
+			void handleAskQuestion();
+		}
+	}
+
+	function clearPendingQuestionTimers(message?: string) {
+		if (pendingQuestionTimeout) {
+			clearTimeout(pendingQuestionTimeout);
+			pendingQuestionTimeout = null;
+		}
+		if (pendingQuestionReject && message) {
+			pendingQuestionReject(new Error(message));
+		}
+		pendingQuestionResolve = null;
+		pendingQuestionReject = null;
+	}
+
+	function handlePendingQuestionFailure(message: string) {
+		if (!pendingQuestionReject) return;
+		const reject = pendingQuestionReject;
+		clearPendingQuestionTimers();
+		reject(new Error(message));
+	}
+
+	function handleQuestionResponseFromSocket(payload: UploadSocketMessage) {
+		if (!pendingQuestionResolve) {
+			return false;
+		}
+		const type = payload.type?.toLowerCase() ?? '';
+		const hasAnswerField =
+			typeof payload.answer === 'string' ||
+			(typeof payload.data === 'object' && payload.data !== null && typeof payload.data['answer'] === 'string');
+		if (!type.includes('answer') && !type.includes('question') && !hasAnswerField) {
+			return false;
+		}
+		const answer = extractAnswerFromQuestionPayload(payload);
+		if (!answer && !payload.error) {
+			return false;
+		}
+		if (payload.error) {
+			handlePendingQuestionFailure(normalizeSocketError(payload.error));
+			return true;
+		}
+		const resolver = pendingQuestionResolve;
+		clearPendingQuestionTimers();
+		resolver(answer ?? 'No answer was returned.');
+		return true;
+	}
+
+	async function handleAskQuestion() {
+		if (chatSending) return;
+		const trimmed = chatInput.trim();
+		if (!trimmed) return;
+		if (!uploadResult) {
+			chatError = 'Upload result required before asking questions.';
+			return;
+		}
+		chatError = '';
+		appendChatMessage(createChatMessage('user', trimmed));
+		chatInput = '';
+		chatSending = true;
+		try {
+			const token = await ensureAccessToken();
+			if (!token) {
+				throw new Error('Please log in to ask questions.');
+			}
+			const answer = await submitUploadQuestion({
+				token,
+				instanceId: uploadResult.id,
+				question: trimmed
+			});
+			appendChatMessage(
+				createChatMessage(
+					'assistant',
+					answer || 'No answer was returned for this question. Please try again.'
+				)
+			);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : 'Failed to send question. Please try again.';
+			if (message !== 'Question cancelled.') {
+				chatError = message;
+				appendChatMessage(createChatMessage('system', message));
+			} else {
+				chatError = '';
+			}
+		} finally {
+			chatSending = false;
+		}
+	}
+
+	type UploadQuestionArgs = {
+		token: string;
+		instanceId: string;
+		question: string;
+	};
+
+	async function submitUploadQuestion({
+		token,
+		instanceId,
+		question
+	}: UploadQuestionArgs): Promise<string> {
+		const payloadQuestion = question.trim();
+		if (!payloadQuestion) {
+			throw new Error('Question cannot be empty.');
+		}
+		if (!activeUploadSocket) {
+			throw new Error('Live connection unavailable. Please upload again before asking questions.');
+		}
+		let socket: WebSocket;
+		try {
+			socket = await ensureUploadsSocketReady(activeUploadSocket);
+		} catch (error) {
+			throw new Error('Live connection unavailable. Please upload again before asking questions.');
+		}
+		return await new Promise<string>((resolve, reject) => {
+			pendingQuestionResolve = resolve;
+			pendingQuestionReject = reject;
+			if (pendingQuestionTimeout) {
+				clearTimeout(pendingQuestionTimeout);
+			}
+			pendingQuestionTimeout = setTimeout(() => {
+				handlePendingQuestionFailure('Question timed out. Please try again.');
+			}, QUESTION_TIMEOUT_MS);
+			try {
+				socket.send(JSON.stringify(UploadSocketCommands.question(instanceId, payloadQuestion)));
+			} catch (error) {
+				handlePendingQuestionFailure('Unable to send question payload.');
+			}
+		});
+	}
+
+	function extractAnswerFromQuestionPayload(payload: UploadSocketMessage | null): string | null {
+		if (!payload) return null;
+		const candidates: Array<string | null | undefined> = [
+			payload.answer,
+			payload.response,
+			typeof payload.message === 'string' &&
+			payload.type &&
+			payload.type.toLowerCase().includes('answer')
+				? payload.message
+				: undefined
+		];
+		if (payload.data && typeof payload.data === 'object') {
+			const record = payload.data as Record<string, unknown>;
+			for (const key of ['answer', 'response', 'message']) {
+				const value = record[key];
+				if (typeof value === 'string') {
+					candidates.push(value);
+				}
+			}
+		}
+		if (payload.instance) {
+			const instanceAny = payload.instance as Record<string, unknown>;
+			if (typeof instanceAny['answer'] === 'string') {
+				candidates.push(instanceAny['answer'] as string);
+			}
+			if (typeof payload.instance.processed_text === 'string') {
+				candidates.push(payload.instance.processed_text);
+			} else if (typeof payload.instance.raw_text === 'string') {
+				candidates.push(payload.instance.raw_text);
+			}
+		}
+		for (const candidate of candidates) {
+			if (candidate && candidate.trim().length > 0) {
+				return candidate.trim();
+			}
+		}
+		return null;
 	}
 
 	function createResultMessage(upload: UploadResponse) {
@@ -505,9 +763,38 @@
 		return { ...upload, previewObjectUrl: null };
 	}
 
+	function getResultImageSource() {
+		if (retainedPreviewUrl) {
+			return retainedPreviewUrl;
+		}
+		if (uploadResult?.image_url) {
+			return toAbsoluteUrl(uploadResult.image_url);
+		}
+		return null;
+	}
+
 	async function previewUploadedImage(upload: UploadCard | null) {
 		if (!upload || !upload.image_url) return;
 		window.open(toAbsoluteUrl(upload.image_url), '_blank', 'noopener,noreferrer');
+	}
+
+	function teardownActiveUploadSocket() {
+		if (pendingQuestionTimeout) {
+			clearTimeout(pendingQuestionTimeout);
+			pendingQuestionTimeout = null;
+		}
+		pendingQuestionResolve = null;
+		pendingQuestionReject = null;
+		if (activeUploadSocket) {
+			activeUploadSocket.onopen = activeUploadSocket.onmessage = activeUploadSocket.onerror = activeUploadSocket.onclose = null;
+			if (
+				activeUploadSocket.readyState === WebSocket.OPEN ||
+				activeUploadSocket.readyState === WebSocket.CONNECTING
+			) {
+				activeUploadSocket.close();
+			}
+		}
+		activeUploadSocket = null;
 	}
 </script>
 
@@ -683,21 +970,31 @@
 	</section>
 
 	{#if resultText}
-		<section class="w-full px-6 mt-8" aria-live="polite">
+		<section class="w-full px-6 mt-6 mb-16" aria-live="polite">
 			<div
 				transition:slide
-				class="mx-auto mt-4 w-full max-w-3xl bg-[var(--card)] shadow-xl rounded-2xl p-6 border border-[var(--border)] text-[var(--foreground)]"
+				class="mx-auto mt-2 w-full max-w-3xl bg-[var(--card)] shadow-xl rounded-2xl p-6 border border-[var(--border)] text-[var(--foreground)]"
 			>
-				<div class="flex items-center justify-between gap-4">
-					<div>
+				<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+					<div class="flex-1">
 						<p class="text-sm uppercase tracking-wide text-[var(--muted-foreground)]">Upload status</p>
 						<p class="text-lg font-semibold">{resultText}</p>
+						{#if uploadResult}
+							<div class="mt-4 flex flex-wrap justify-start gap-2 text-[11px] uppercase tracking-wide">
+								{#each formatOptionLabels(uploadResult) as label}
+									<span class="rounded-full border border-[var(--border)] px-2 py-0.5">{label}</span>
+								{/each}
+							</div>
+						{/if}
 					</div>
-					{#if uploadResult}
-						<div class="flex flex-wrap justify-end gap-2 text-[11px] uppercase tracking-wide">
-							{#each formatOptionLabels(uploadResult) as label}
-								<span class="rounded-full border border-[var(--border)] px-2 py-0.5">{label}</span>
-							{/each}
+					{#if getResultImageSource()}
+						<div class="mx-auto flex w-full max-w-[200px] flex-col items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/30 p-3 lg:mx-0">
+							<img
+								src={getResultImageSource()}
+								alt="Uploaded preview"
+								class="h-40 w-full rounded-xl object-cover"
+							/>
+							<p class="text-xs text-[var(--muted-foreground)]">Latest processed image</p>
 						</div>
 					{/if}
 				</div>
@@ -714,6 +1011,74 @@
 						<a href="/dashboard" class="text-sm text-[var(--primary)] underline">Open dashboard</a>
 					</div>
 				{/if}
+			</div>
+		</section>
+	{/if}
+
+	{#if uploadResult}
+		<section class="w-full px-6 mt-4 mb-12" aria-label="Ask questions about the extracted text">
+			<div class="mx-auto w-full max-w-3xl rounded-3xl border border-[var(--border)] bg-[var(--card)]/90 p-6 shadow-lg text-[var(--foreground)]">
+				<div class="flex flex-col gap-1">
+					<p class="text-sm uppercase tracking-wide text-[var(--muted-foreground)]">
+						Chat about this upload
+					</p>
+					<p class="text-xs text-[var(--muted-foreground)]">
+						Ask follow-up questions or request clarifications about the extracted text.
+					</p>
+				</div>
+
+				<div
+					class="mt-4 max-h-64 space-y-3 overflow-y-auto pr-1"
+					role="log"
+					aria-live="polite"
+				>
+					{#if chatMessages.length === 0}
+						<p class="text-sm text-[var(--muted-foreground)]">
+							No questions yet. Ask how to interpret the OCR output or request specific formatting tips.
+						</p>
+					{:else}
+						{#each chatMessages as message (message.id)}
+							<div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+								<div
+									class={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
+										message.role === 'user'
+											? 'bg-[var(--primary)] text-[var(--primary-foreground)]'
+											: message.role === 'assistant'
+												? 'bg-[var(--muted)]/50 text-[var(--foreground)]'
+												: 'bg-amber-100/60 text-amber-900'
+									}`}
+								>
+									{message.text}
+								</div>
+							</div>
+						{/each}
+					{/if}
+				</div>
+
+				{#if chatError}
+					<p class="mt-3 text-sm text-destructive" role="alert">
+						{chatError}
+					</p>
+				{/if}
+
+				<div class="mt-4 flex flex-col gap-3 md:flex-row">
+					<textarea
+						class="min-h-[80px] flex-1 rounded-2xl border border-[var(--border)] bg-transparent p-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--primary)]"
+						placeholder="Ask about important details, summaries, or instructions for this upload..."
+						rows="3"
+						bind:value={chatInput}
+						disabled={chatSending}
+						on:keydown={handleChatKeydown}
+					/>
+					<button
+						type="button"
+						class="w-full rounded-2xl bg-[var(--primary)] px-6 py-3 text-sm font-semibold text-[var(--primary-foreground)] transition hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
+						on:click={() => void handleAskQuestion()}
+						disabled={chatSending || !chatInput.trim()}
+					>
+						{chatSending ? 'Sending...' : 'Send'}
+					</button>
+				</div>
 			</div>
 		</section>
 	{/if}
@@ -769,25 +1134,12 @@
 								</button>
 							</div>
 						</div>
+						</div>
+						{/each}
 					</div>
-				{/each}
-			</div>
-		</section>
-	{/if}
-
-	<footer class="mt-auto border-t border-[var(--border)]/60 bg-[var(--card)]/40 text-[var(--muted-foreground)]">
-		<div class="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-8 text-center text-sm sm:flex-row sm:items-center sm:justify-between">
-			<p>&copy; {new Date().getFullYear()} {BRAND_NAME}. All rights reserved.</p>
-			<div class="flex flex-wrap justify-center gap-4 text-xs uppercase tracking-wide">
-				<a href="/dashboard" class="text-[var(--primary)] hover:underline">Dashboard</a>
-				<a href="/documentation" class="text-[var(--primary)] hover:underline">Docs</a>
-				<a href="/login" class="text-[var(--primary)] hover:underline">Login</a>
-				<a href="/signup" class="text-[var(--primary)] hover:underline">Get Started</a>
-			</div>
-		</div>
-	</footer>
+					</section>
+					{/if}
 </main>
-
 <style>
 	/* تغيير الخط إلى Inter لجميع العناصر */
 	@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
