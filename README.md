@@ -33,7 +33,7 @@ Make sure you have [Node.js](https://nodejs.org/) and npm installed on your mach
 
 ### Installation
 
-1.  Clone the repo (replace `your_username/your_repository` with your actual repo path)
+1.  Clone the repo
     ```sh
     git clone https://github.com/Majarra0/text-extraction.git
     ```
