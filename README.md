@@ -1,266 +1,54 @@
-# Yo, OCR your files!
+# Text Extractor - OCR in your Browser
+
+*Yo, OCR your files!*
 
 ![screenshot](images/Screenshot.jpg)
 
-# Upload WebSocket API Reference  
+## About The Project
 
-**Live File Status & OCR Streaming for Django Channels**
+A simple, web-based tool to extract text from your images directly in your browser. Built with Svelte and [Tesseract.js](https://tesseract.projectnaptha.com/), it offers a private and fast way to perform Optical Character Recognition (OCR) without sending your data to a server.
 
-> **Main entry:** [`backend_main/backend/asgi.py`](backend_main/backend/asgi.py)  
-> **WebSocket Consumer:** [`backend_main/core/consumers.py`](backend_main/core/consumers.py)  
-> **OCR Stream/Task:** [`backend_main/core/tasks.py`](backend_main/core/tasks.py)
+### Built With
 
----
+*   [Svelte](https://svelte.dev/)
+*   [Vite](https://vitejs.dev/)
 
-## 📡 WebSocket Endpoints
+## Backend & API
 
-Connect via:
+*   **API Documentation**: [api_endpoints.md](api_endpoints.md)
+*   **Backend Repository**: [https://github.com/karar-hayder/Backend](https://github.com/karar-hayder/Backend)
 
-```
-ws://<server>/ws/core/upload/
-ws://<server>/ws/core/upload/<uuid:instance_id>/
-```
+## Getting Started
 
-- `/ws/core/upload/` — subscribe for all your uploads, live.
-- `/ws/core/upload/<id>/` — get live updates for a single upload.
+To get a local copy up and running, follow these simple steps.
 
-**Authentication:**  
+### Prerequisites
 
-- Required.  
-- Use JWT token as query param: `?token=<jwt_here>`  
-- Only authenticated users can connect.
+Make sure you have [Node.js](https://nodejs.org/) and npm installed on your machine.
 
----
-
-## 📑 Message Patterns & Commands
-
-**All requests and responses are JSON. Every message includes a `"type"` string.**
-
-### 1️⃣ Subscribe
-
-_Request (client):_
-
-```json
-{ "type": "subscribe" }
-```
-
-_Response:_
-
-```json
-{
-  "message": "subscribed",
-  "model": "Upload",
-  "instance_id": null
-}
-```
-
----
-
-### 2️⃣ Create Upload
-
-**Send either:**  
-
-- `image_base64`,  
-- or `image_path`,  
-- or `image_hash`
-
-_Request:_
-
-```json
-{
-  "type": "create",
-  "data": {
-    "image_base64": "<base64-string>",
-    "image_path": "/srv/uploads/optional.jpg",
-    "image_hash": "optional-sha256"
-  }
-}
-```
-
-_Success:_
-
-```json
-{
-  "type": "Upload.created",
-  "instance": {
-    "id": "...",
-    "image_path": "...",
-    "owner": "...",
-    "status": "pending"
-  },
-  "duplicate": false
-}
-```
-
-_Duplicate upload (by hash):_
-
-```json
-{
-  "type": "Upload.created",
-  "instance": { ... },
-  "duplicate": true
-}
-```
-
-_Error:_
-
-```json
-{
-  "type": "Upload.created",
-  "error": {
-    "image_base64": "Invalid base64 encoding: ..."
-  }
-}
-```
-
----
-
-### 3️⃣ List Uploads
-
-_Request:_
-
-```json
-{ "type": "list" }
-```
-
-_Response:_
-
-```json
-{
-  "type": "Upload.list",
-  "list": [ { /* Upload instance */ }, ... ]
-}
-```
-
----
-
-### 4️⃣ Retrieve / Status
-
-_Request (fetch by id):_
-
-```json
-{
-  "type": "retrieve",
-  "instance_id": "<upload-id>"
-}
-```
-
-_Response:_
-
-```json
-{
-  "type": "Upload.status",
-  "instance": { /* status and metadata */ }
-}
-```
-
----
-
-### 5️⃣ Update / Delete
-
-_Update:_
-
-```json
-{
-  "type": "update",
-  "instance_id": "<id>",
-  "data": { /* fields */ }
-}
-```
-
-_Delete:_
-
-```json
-{
-  "type": "delete",
-  "instance_id": "<id>"
-}
-```
-
----
-
-## 🔄 Live Status Events
-
-All actions related to your uploads are broadcasted—**including creates, updates, deletes, and OCR status**:
-
-```json
-{
-  "type": "Upload.created" | "Upload.updated" | "Upload.deleted" | "Upload.status",
-  "instance": { /* latest upload state */ }
-}
-```
-
----
-
-## 🧠 Live OCR Streaming
-
-When OCR is triggered, the API streams status and text as events:
-
-_Partial OCR (while processing):_
-
-```json
-{
-  "id": "<upload-id>",
-  "status": "processing",
-  "streamed_text": "<streamed-markdown-so-far>",
-  "type": "Upload.status"
-}
-```
-
-_Finished OCR:_
-
-```json
-{
-  "id": "<upload-id>",
-  "status": "processed",
-  "raw_text": "<whole-markdown>",
-  "processed_text": "<optional-parsed>",
-  "type": "Upload.status"
-}
-```
-
-_Error:_
-
-```json
-{
-  "id": "<upload-id>",
-  "status": "error",
-  "type": "Upload.status",
-  "error": "Description of the issue"
-}
-```
-
-- See [`backend_main/core/tasks.py`](backend_main/core/tasks.py) for backend details.
-
----
-
-## 💡 Notes & Best Practices
-
-- All file, OCR, and status changes are realtime and user-scoped.
-- Duplicate detection (by hash + user) is enforced: see responses.
-- Unlimited-sized base64 is supported (may impact latency).
-- All `"instance"` fields follow your Upload model/serializer.
-- All errors include the `"type"` field for easy handling.
-
----
-
-## 🚦 Example: End-to-End Flow
-
-1. **Connect** (JWT as query param).
-2. **Send**:
-
-    ```json
-    { "type": "create", "data": { "image_base64": "<...>" } }
+*   npm
+    ```sh
+    npm install npm@latest -g
     ```
 
-3. **Receive:**
-    - `Upload.created` (with your instance)
-    - Streaming `Upload.status` (with `"processing"` & `streamed_text`)
-    - Final `Upload.status` (with OCR result and status `"processed"`)
-4. **Listen for more events:** Any change to any of your uploads is pushed in real-time.
+### Installation
 
----
+1.  Clone the repo (replace `your_username/your_repository` with your actual repo path)
+    ```sh
+    git clone https://github.com/Majarra0/text-extraction.git
+    ```
+2.  Install NPM packages
+    ```sh
+    npm install
+    ```
+3.  Start the development server
+    ```sh
+    npm run dev
+    ```
 
-**See code in [`backend_main/backend/asgi.py`](backend_main/backend/asgi.py), [`core/consumers.py`](backend_main/core/consumers.py), and [`core/tasks.py`](backend_main/core/tasks.py) for API and group routing details.**
+## Usage
 
-_If you need exact WebSocket host or JWT signing info, ask your backend team!_
+1.  Open the application in your browser (usually at `http://localhost:5173`).
+2.  Drag and drop an image file (e.g., PNG, JPG) onto the drop zone, or click to select a file.
+3.  Wait for the OCR process to complete.
+4.  The extracted text will appear in the text area. You can then copy it to your clipboard.
