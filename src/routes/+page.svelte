@@ -11,7 +11,7 @@
 		ensureUploadsSocketReady
 	} from '$lib/api/uploadsSocket';
 	import { notifySuccess } from '$lib/stores/notifications';
-	
+
 	type FollowupQAEntry = { role: string; content: string };
 	type UploadResponse = {
 		id: string;
@@ -81,7 +81,7 @@
 	let languageHint = '';
 	let outputFormat: 'raw' | 'paragraph' = 'raw';
 	let ocrMode: 'fast' | 'high_accuracy' = 'fast';
-	let chatMessages: ChatMessage[] = [];
+	let chatMessages: ChatMessage[] = $state([]);
 	let chatInput = '';
 	let chatSending = false;
 	let chatError = '';
@@ -90,11 +90,11 @@
 	let pendingQuestionReject: ((error: Error) => void) | null = null;
 	let pendingQuestionTimeout: ReturnType<typeof setTimeout> | null = null;
 	const WEBSOCKET_TIMEOUT_MS = 60000;
-	const QUESTION_TIMEOUT_MS = import.meta.env.VITE_API_TIMEOUT||3000000;
+	const QUESTION_TIMEOUT_MS = import.meta.env.VITE_API_TIMEOUT || 3000000;
 
-	$: uploadedImageEndpoint = uploadResult?.image_url
-		? toAbsoluteUrl(uploadResult.image_url)
-		: '';
+	const uploadedImageEndpoint = $derived(
+		uploadResult?.image_url ? toAbsoluteUrl(uploadResult.image_url) : ''
+	);
 
 	onMount(() => {
 		try {
@@ -144,7 +144,9 @@
 		}
 	}
 
-	function clearSelectedFile(options: { preserveFeedback?: boolean; retainPreview?: boolean } = {}) {
+	function clearSelectedFile(
+		options: { preserveFeedback?: boolean; retainPreview?: boolean } = {}
+	) {
 		const { preserveFeedback = false, retainPreview = false } = options;
 		if (retainPreview && previewUrl) {
 			retainedPreviewUrl = previewUrl;
@@ -298,42 +300,38 @@
 			payloadData.language_hint = requestData.language_hint;
 		}
 
-			return new Promise<UploadResponse>((resolve, reject) => {
-				let settled = false;
-				let socket: WebSocket | null = null;
-				let timeoutId: ReturnType<typeof setTimeout>;
-				const cleanup = (shouldClose = true) => {
-					if (socket) {
-						socket.onopen =
-							socket.onmessage =
-							socket.onerror =
-							socket.onclose =
-								null;
-						if (
-							shouldClose &&
-							(socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
-						) {
-							socket.close();
-						}
+		return new Promise<UploadResponse>((resolve, reject) => {
+			let settled = false;
+			let socket: WebSocket | null = null;
+			let timeoutId: ReturnType<typeof setTimeout>;
+			const cleanup = (shouldClose = true) => {
+				if (socket) {
+					socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
+					if (
+						shouldClose &&
+						(socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+					) {
+						socket.close();
 					}
-					if (shouldClose && activeUploadSocket === socket) {
-						activeUploadSocket = null;
-					}
-					socket = null;
-				};
-				const finishWithError = (message: string) => {
-					if (settled) return;
-					settled = true;
+				}
+				if (shouldClose && activeUploadSocket === socket) {
+					activeUploadSocket = null;
+				}
+				socket = null;
+			};
+			const finishWithError = (message: string) => {
+				if (settled) return;
+				settled = true;
 				clearTimeout(timeoutId);
 				cleanup();
 				reject(new Error(message));
 			};
-				const finishWithSuccess = (data: UploadResponse) => {
-					if (settled) return;
-					settled = true;
-					clearTimeout(timeoutId);
-					resolve(data);
-				};
+			const finishWithSuccess = (data: UploadResponse) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeoutId);
+				resolve(data);
+			};
 
 			timeoutId = setTimeout(() => {
 				finishWithError('Upload timed out. Please try again.');
@@ -343,13 +341,13 @@
 				onProgress?.(status, extras);
 			};
 
-				try {
-					socket = createUploadsWebSocket(token);
-					activeUploadSocket = socket;
-				} catch (error) {
-					finishWithError('Failed to open WebSocket connection.');
-					return;
-				}
+			try {
+				socket = createUploadsWebSocket(token);
+				activeUploadSocket = socket;
+			} catch (error) {
+				finishWithError('Failed to open WebSocket connection.');
+				return;
+			}
 
 			socket.onopen = () => {
 				const initializeUpload = async () => {
@@ -364,35 +362,32 @@
 				void initializeUpload();
 			};
 
-				socket.onerror = () => {
-					finishWithError('WebSocket error while uploading image.');
-				};
+			socket.onerror = () => {
+				finishWithError('WebSocket error while uploading image.');
+			};
 
-				socket.onclose = () => {
-					if (activeUploadSocket === socket) {
-						activeUploadSocket = null;
-						handlePendingQuestionFailure('Live connection closed.');
-					}
-					if (!settled) {
-						finishWithError('Connection closed before upload completed.');
-					}
-				};
+			socket.onclose = () => {
+				if (activeUploadSocket === socket) {
+					activeUploadSocket = null;
+					handlePendingQuestionFailure('Live connection closed.');
+				}
+				if (!settled) {
+					finishWithError('Connection closed before upload completed.');
+				}
+			};
 
 			socket.onmessage = (event) => {
 				let payload: UploadSocketMessage;
 				try {
-					console.log(event.data);
-					console.log(JSON.parse(event.data));
 					payload = JSON.parse(event.data) as UploadSocketMessage;
 				} catch (error) {
 					console.error('Failed to parse websocket payload', error);
 					return;
 				}
-				// console.log(payload);
 				if (!payload?.type) {
 					return;
 				}
-
+				// handle question responses first
 				handleQuestionResponseFromSocket(payload);
 
 				if (payload.type === 'Upload.created') {
@@ -405,7 +400,7 @@
 					if (!upload) return;
 
 					handleProgress(upload, { duplicate: payload.duplicate ?? false });
-  					hydrateChatFromFollowups(upload.followup_qa);
+					hydrateChatFromFollowups(upload.followup_qa);
 					if (payload.duplicate) {
 						finishWithSuccess(upload);
 					}
@@ -445,7 +440,7 @@
 					}
 					return;
 				}
-				
+
 				if (payload.error) {
 					const message = normalizeSocketError(payload.error);
 					finishWithError(message);
@@ -456,11 +451,11 @@
 
 	function extractUploadFromPayload(payload: UploadSocketMessage): UploadResponse | null {
 		// check the followup_qa
-		  const followups = Array.isArray(payload.instance?.followup_qa)
+		const followups = Array.isArray(payload.instance?.followup_qa)
 			? payload.instance!.followup_qa
 			: Array.isArray(payload.followup_qa)
-			? payload.followup_qa
-			: [];
+				? payload.followup_qa
+				: [];
 		if (payload.instance) {
 			return { ...payload.instance, followup_qa: followups };
 		}
@@ -468,15 +463,15 @@
 			return null;
 		}
 		return {
-		id: payload.id,
-		status: payload.status,
-		streamed_text: payload.streamed_text,
-		raw_text: payload.raw_text,
-		processed_text: payload.processed_text,
-		image_url: payload.image_url,
-		followup_qa: followups,
-		question: typeof payload.question === 'string' ? payload.question : undefined,
-		answer: typeof payload.answer === 'string' ? payload.answer : undefined
+			id: payload.id,
+			status: payload.status,
+			streamed_text: payload.streamed_text,
+			raw_text: payload.raw_text,
+			processed_text: payload.processed_text,
+			image_url: payload.image_url,
+			followup_qa: followups,
+			question: typeof payload.question === 'string' ? payload.question : undefined,
+			answer: typeof payload.answer === 'string' ? payload.answer : undefined
 		};
 	}
 
@@ -501,7 +496,9 @@
 		}
 	}
 
-	function normalizeSocketError(error: Record<string, string[] | string> | string | null | undefined) {
+	function normalizeSocketError(
+		error: Record<string, string[] | string> | string | null | undefined
+	) {
 		if (!error) return 'Upload failed.';
 		if (typeof error === 'string') return error;
 		const messages: string[] = [];
@@ -515,7 +512,10 @@
 		}
 		return messages.length > 0 ? messages.join(' ') : 'Upload failed.';
 	}
-	function appendAnsweredQuestionToChat(entry: { question?: string | null; answer?: string | null }) {
+	function appendAnsweredQuestionToChat(entry: {
+		question?: string | null;
+		answer?: string | null;
+	}) {
 		const normalize = (value?: string | null) => {
 			if (!value) return undefined;
 			const trimmed = value.trim();
@@ -537,8 +537,8 @@
 		const mapped = followups
 			.filter((item) => typeof item?.content === 'string' && item.content.trim())
 			.map((item) => {
-			const role = item.role === 'user' || item.role === 'assistant' ? item.role : 'system';
-			return createChatMessage(role, item.content);
+				const role = item.role === 'user' || item.role === 'assistant' ? item.role : 'system';
+				return createChatMessage(role, item.content);
 			});
 		if (mapped.length) {
 			chatMessages = mapped;
@@ -592,7 +592,7 @@
 		clearPendingQuestionTimers();
 		reject(new Error(message));
 	}
-
+	// 
 	function handleQuestionResponseFromSocket(payload: UploadSocketMessage) {
 		if (!pendingQuestionResolve) {
 			return false;
@@ -602,11 +602,12 @@
 		const hasAnswerField =
 			typeof payload.answer === 'string' ||
 			typeof payload.question === 'string' ||
-			typeof payload.status === 'string' && payload.status.toLowerCase().includes('answer') ||
+			(typeof payload.status === 'string' && payload.status.toLowerCase().includes('answer')) ||
 			(instance &&
 				(typeof instance.answer === 'string' ||
 					typeof instance.question === 'string' ||
-					(typeof instance.status === 'string' && instance.status.toLowerCase().includes('answer')))) ||
+					(typeof instance.status === 'string' &&
+						instance.status.toLowerCase().includes('answer')))) ||
 			(typeof payload.data === 'object' &&
 				payload.data !== null &&
 				typeof (payload.data as Record<string, unknown>)['answer'] === 'string');
@@ -758,7 +759,6 @@
 	}
 
 	function triggerFileDialog() {
-		
 		const input = document.getElementById('image-upload') as HTMLInputElement | null;
 		input?.click();
 	}
@@ -859,7 +859,11 @@
 		pendingQuestionResolve = null;
 		pendingQuestionReject = null;
 		if (activeUploadSocket) {
-			activeUploadSocket.onopen = activeUploadSocket.onmessage = activeUploadSocket.onerror = activeUploadSocket.onclose = null;
+			activeUploadSocket.onopen =
+				activeUploadSocket.onmessage =
+				activeUploadSocket.onerror =
+				activeUploadSocket.onclose =
+					null;
 			if (
 				activeUploadSocket.readyState === WebSocket.OPEN ||
 				activeUploadSocket.readyState === WebSocket.CONNECTING
@@ -869,8 +873,6 @@
 		}
 		activeUploadSocket = null;
 	}
-
-
 </script>
 
 <Header title="OCR"></Header>
@@ -884,9 +886,12 @@
 					<span>, OCR your files!</span>
 				</h1>
 				<p class="text-base text-[var(--muted-foreground)] max-w-3xl mx-auto leading-relaxed">
-					Drag a screenshot anywhere into the workspace or tap the canvas to pick a file. PNG, JPG, and HEIC are all welcome.
+					Drag a screenshot anywhere into the workspace or tap the canvas to pick a file. PNG, JPG,
+					and HEIC are all welcome.
 				</p>
-				<p class="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Lossless previews • Realtime uploads</p>
+				<p class="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">
+					Lossless previews • Realtime uploads
+				</p>
 			</div>
 			<div class="space-y-8 max-w-4xl mx-auto w-full">
 				<div
@@ -923,7 +928,9 @@
 				/>
 
 				{#if previewUrl && selectedFile}
-					<div class="flex items-start gap-4 rounded-2xl border border-dashed border-[var(--border)]/70 p-4 bg-[var(--card)]/80">
+					<div
+						class="flex items-start gap-4 rounded-2xl border border-dashed border-[var(--border)]/70 p-4 bg-[var(--card)]/80"
+					>
 						<img
 							src={previewUrl}
 							alt="Selected preview"
@@ -952,16 +959,17 @@
 						on:click={() => (showAdvanced = !showAdvanced)}
 					>
 						<span>Advanced OCR options</span>
-						<span class="text-xs text-[var(--muted-foreground)]">{showAdvanced ? 'Hide' : 'Show'}</span>
+						<span class="text-xs text-[var(--muted-foreground)]"
+							>{showAdvanced ? 'Hide' : 'Show'}</span
+						>
 					</button>
 					{#if showAdvanced}
-						<div id="advanced-ocr-options" class="space-y-4 border-t border-[var(--border)]/70 px-5 py-5 text-sm">
+						<div
+							id="advanced-ocr-options"
+							class="space-y-4 border-t border-[var(--border)]/70 px-5 py-5 text-sm"
+						>
 							<label class="flex items-center gap-2">
-								<input
-									type="checkbox"
-									class="h-4 w-4"
-									bind:checked={autoLanguageDetection}
-								/>
+								<input type="checkbox" class="h-4 w-4" bind:checked={autoLanguageDetection} />
 								<span>Detect language automatically</span>
 							</label>
 							{#if !autoLanguageDetection}
@@ -1052,18 +1060,25 @@
 			>
 				<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
 					<div class="flex-1">
-						<p class="text-sm uppercase tracking-wide text-[var(--muted-foreground)]">Upload status</p>
+						<p class="text-sm uppercase tracking-wide text-[var(--muted-foreground)]">
+							Upload status
+						</p>
 						<p class="text-lg font-semibold">{resultText}</p>
 						{#if uploadResult}
-							<div class="mt-4 flex flex-wrap justify-start gap-2 text-[11px] uppercase tracking-wide">
+							<div
+								class="mt-4 flex flex-wrap justify-start gap-2 text-[11px] uppercase tracking-wide"
+							>
 								{#each formatOptionLabels(uploadResult) as label}
-									<span class="rounded-full border border-[var(--border)] px-2 py-0.5">{label}</span>
+									<span class="rounded-full border border-[var(--border)] px-2 py-0.5">{label}</span
+									>
 								{/each}
 							</div>
 						{/if}
 					</div>
 					{#if getResultImageSource()}
-						<div class="mx-auto flex w-full max-w-[200px] flex-col items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/30 p-3 lg:mx-0">
+						<div
+							class="mx-auto flex w-full max-w-[200px] flex-col items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/30 p-3 lg:mx-0"
+						>
 							<img
 								src={getResultImageSource()}
 								alt="Uploaded preview"
@@ -1092,7 +1107,9 @@
 
 	{#if uploadResult}
 		<section class="w-full px-6 mt-4 mb-12" aria-label="Ask questions about the extracted text">
-			<div class="mx-auto w-full max-w-3xl rounded-3xl border border-[var(--border)] bg-[var(--card)]/90 p-6 shadow-lg text-[var(--foreground)]">
+			<div
+				class="mx-auto w-full max-w-3xl rounded-3xl border border-[var(--border)] bg-[var(--card)]/90 p-6 shadow-lg text-[var(--foreground)]"
+			>
 				<div class="flex flex-col gap-1">
 					<p class="text-sm uppercase tracking-wide text-[var(--muted-foreground)]">
 						Chat about this upload
@@ -1102,14 +1119,11 @@
 					</p>
 				</div>
 
-				<div
-					class="mt-4 max-h-64 space-y-3 overflow-y-auto pr-1"
-					role="log"
-					aria-live="polite"
-				>
+				<div class="mt-4 max-h-64 space-y-3 overflow-y-auto pr-1" role="log" aria-live="polite">
 					{#if chatMessages.length === 0}
 						<p class="text-sm text-[var(--muted-foreground)]">
-							No questions yet. Ask how to interpret the OCR output or request specific formatting tips.
+							No questions yet. Ask how to interpret the OCR output or request specific formatting
+							tips.
 						</p>
 					{:else}
 						{#each chatMessages as message (message.id)}
@@ -1159,15 +1173,22 @@
 	{/if}
 
 	{#if recentUploads.length > 0}
-		<section class="w-full max-w-6xl mx-auto px-6 pb-12 text-[var(--foreground)] mt-12" aria-label="Recent uploads">
+		<section
+			class="w-full max-w-6xl mx-auto px-6 pb-12 text-[var(--foreground)] mt-12"
+			aria-label="Recent uploads"
+		>
 			<div class="flex items-center justify-between mb-4">
 				<h2 class="text-lg font-semibold">Recent uploads</h2>
 				<p class="text-xs text-[var(--muted-foreground)]">{recentUploads.length} active</p>
 			</div>
 			<div class="grid gap-4 md:grid-cols-2">
 				{#each recentUploads as item (item.id)}
-					<div class="flex gap-4 rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 p-4 shadow-sm">
-						<div class="w-24 h-24 rounded-xl border overflow-hidden flex items-center justify-center bg-[var(--muted)]/40">
+					<div
+						class="flex gap-4 rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 p-4 shadow-sm"
+					>
+						<div
+							class="w-24 h-24 rounded-xl border overflow-hidden flex items-center justify-center bg-[var(--muted)]/40"
+						>
 							{#if item.previewObjectUrl}
 								<img
 									src={item.previewObjectUrl}
@@ -1185,7 +1206,8 @@
 							</p>
 							<div class="flex flex-wrap gap-2 text-[11px] uppercase tracking-wide">
 								{#each formatOptionLabels(item) as label}
-									<span class="rounded-full border border-[var(--border)] px-2 py-0.5">{label}</span>
+									<span class="rounded-full border border-[var(--border)] px-2 py-0.5">{label}</span
+									>
 								{/each}
 							</div>
 							<div class="flex flex-wrap items-center gap-3 text-xs pt-1">
@@ -1198,7 +1220,9 @@
 								>
 									Preview
 								</button>
-								<a href="/dashboard" class="text-[var(--primary)] underline text-xs">View in dashboard</a>
+								<a href="/dashboard" class="text-[var(--primary)] underline text-xs"
+									>View in dashboard</a
+								>
 								<button
 									type="button"
 									class="text-red-500 hover:underline text-xs"
@@ -1209,12 +1233,13 @@
 								</button>
 							</div>
 						</div>
-						</div>
-						{/each}
 					</div>
-					</section>
-					{/if}
+				{/each}
+			</div>
+		</section>
+	{/if}
 </main>
+
 <style>
 	/* تغيير الخط إلى Inter لجميع العناصر */
 	@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
