@@ -15,7 +15,7 @@ A simple, web-based tool to extract text from your images directly in your brows
 
 ## Backend & API
 
-*   **API Documentation**: [api_endpoints.md](api_endpoints.md)
+*   **API Documentation**: [api_endpoints.md](API_endpoints.md)
 *   **Backend Repository**: [https://github.com/karar-hayder/Backend](https://github.com/karar-hayder/Backend)
 
 ## Getting Started
